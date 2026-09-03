@@ -1,0 +1,62 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: irtrixai-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-irtrixai_db}
+      POSTGRES_USER: ${POSTGRES_USER:-irtrixai}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-irtrixai_dev_password}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER:-irtrixai} -d ${POSTGRES_DB:-irtrixai_db}",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: .
+      dockerfile: docker/backend.Dockerfile
+    container_name: irtrixai-backend
+    restart: unless-stopped
+    volumes:
+      - ./backend:/app
+      - ./workspaces:/workspaces
+      - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-irtrixai}:${POSTGRES_PASSWORD:-irtrixai_dev_password}@postgres:5432/${POSTGRES_DB:-irtrixai_db}
+      - ENVIRONMENT=development
+      - WORKSPACE_BASE_PATH=/workspaces
+      - DOCKER_SANDBOX_IMAGE=irtrixai-sandbox:latest
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: ../docker/frontend.Dockerfile
+    container_name: irtrixai-frontend
+    restart: unless-stopped
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    ports:
+      - "5173:5173"
+    environment:
+      - VITE_API_URL=http://localhost:8000
+    depends_on:
+      - backend
+
+volumes:
+  pgdata:
