@@ -7,33 +7,11 @@ from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.constants import IGNORED_DIRECTORIES, IGNORED_FILES
 from app.core.exceptions import AppException, EntityNotFoundException
 from app.core.security import resolve_safe_path
 from app.db.models import Workspace
 from app.schemas.workspace import FileTreeNode, WorkspaceCreate
-
-IGNORED_DIRECTORIES = {
-    ".git",
-    "node_modules",
-    "__pycache__",
-    ".venv",
-    "venv",
-    ".pytest_cache",
-    ".mypy_cache",
-    ".ruff_cache",
-    "dist",
-    "build",
-    ".idea",
-    ".vscode",
-    ".next",
-    "target",
-}
-
-IGNORED_FILES = {
-    ".DS_Store",
-    "Thumbs.db",
-    "desktop.ini",
-}
 
 
 class WorkspaceService:
