@@ -3,27 +3,28 @@ from pathlib import Path
 from app.core.exceptions import SecurityViolationException
 
 
-def resolve_safe_path(base_dir: str | Path, target_path: str | Path = ".") -> Path:
-    """Resolves target_path strictly within base_dir.
+def resolve_safe_path(base_directory: str | Path, target_path: str | Path) -> Path:
+    """Resolves target_path strictly within base_directory.
 
-    Prevents directory traversal (../), absolute path hijacking,
-    and symlink escapes.
+    Prevents directory traversal (../), absolute escapes, and symlink escapes.
+    Raises SecurityViolationException if the resolved path is outside base_directory.
+    The exception message deliberately excludes the host's absolute base_directory
+    to prevent filesystem topology disclosure.
     """
-    base = Path(base_dir).resolve()
+    base = Path(base_directory).resolve()
     target = Path(target_path)
 
-    # In Python, Path('/a') / '/b' resolves to Path('/b').
-    # Use ternary operator to handle absolute and relative inputs cleanly.
-    resolved_target = target.resolve() if target.is_absolute() else (base / target).resolve()
+    if target.is_absolute():
+        resolved = target.resolve()
+    else:
+        resolved = (base / target).resolve()
 
     try:
-        if not resolved_target.is_relative_to(base):
-            raise SecurityViolationException(
-                f"Access denied: path '{target_path}' escapes workspace root '{base}'"
-            )
-    except (ValueError, RuntimeError) as err:
+        resolved.relative_to(base)
+    except ValueError:
         raise SecurityViolationException(
-            f"Access denied: invalid path traversal detected for '{target_path}'"
-        ) from err
+            f"Access denied: path '{target_path}' escapes workspace boundary.",
+            details={"path": str(target_path)},
+        )
 
-    return resolved_target
+    return resolved

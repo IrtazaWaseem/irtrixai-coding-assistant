@@ -1,9 +1,10 @@
 import asyncio
 import uuid
 
+from sqlalchemy import inspect, select, text
+
 from app.db.models import AgentEvent, Run, Task, TaskStatus, Workspace
 from app.db.session import AsyncSessionLocal, engine
-from sqlalchemy import inspect, select, text
 
 
 async def run_connectivity_test() -> None:

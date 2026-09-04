@@ -35,9 +35,12 @@ def _handle_git_error(
 def _execute_git_cmd(
     cmd: list[str],
     workspace_root: Path,
-    timeout_seconds: int = settings.COMMAND_TIMEOUT_SECONDS,
+    timeout_seconds: int | None = None,
 ) -> tuple[int, str, str]:
     """Deterministically executes a pre-tokenized Git command without shell=True."""
+    if timeout_seconds is None:
+        timeout_seconds = settings.COMMAND_TIMEOUT_SECONDS
+
     env = {
         **os.environ,
         "GIT_TERMINAL_PROMPT": "0",
@@ -68,8 +71,8 @@ def _verify_git_repo(base_dir: Path) -> None:
     )
     if code != 0 or stdout.strip() != "true":
         raise ToolExecutionException(
-            f"Workspace '{base_dir}' is not a Git repository.",
-            details={"workspace": str(base_dir), "error": stderr.strip()},
+            f"Workspace '{base_dir.name}' is not a Git repository.",
+            details={"workspace": base_dir.name, "error": stderr.strip()},
         )
 
 
@@ -77,7 +80,7 @@ def git_status(
     workspace_root: str | Path | None = None,
     raise_on_error: bool = False,
 ) -> ToolResult:
-    """Returns deterministic status information about modified, untracked, deleted, and staged files."""
+    """Returns status information about modified, untracked, deleted, and staged files."""
     try:
         base_dir = validate_workspace_dir(workspace_root)
         _verify_git_repo(base_dir)
@@ -128,9 +131,9 @@ def git_status(
             elif y == "D":
                 deleted.append(path_str)
 
-        modified = sorted(list(set(modified)))
-        untracked = sorted(list(set(untracked)))
-        deleted = sorted(list(set(deleted)))
+        modified = sorted(set(modified))
+        untracked = sorted(set(untracked))
+        deleted = sorted(set(deleted))
         staged.sort(key=lambda s: (s.path, s.status))
 
         is_clean = not (modified or untracked or deleted or staged)
@@ -144,7 +147,7 @@ def git_status(
             staged=staged,
         )
         return ToolResult.ok(tool_name="git_status", output=result_data.model_dump())
-    except Exception as err:
+    except Exception as err:  # noqa: BLE001
         return _handle_git_error("git_status", err, raise_on_error)
 
 
@@ -179,14 +182,14 @@ def git_diff(
         if code != 0:
             raise ToolExecutionException(f"git diff failed: {stderr.strip() or stdout.strip()}")
 
-        content, truncated = truncate_output(stdout, max_bytes=settings.MAX_TOOL_OUTPUT_BYTES)
+        content, truncated = truncate_output(stdout)
         metadata = {
             "truncated": truncated,
             "byte_count": len(content.encode("utf-8")),
             "file_path": rel_path,
         }
         return ToolResult.ok(tool_name="git_diff", output=content, metadata=metadata)
-    except Exception as err:
+    except Exception as err:  # noqa: BLE001
         return _handle_git_error("git_diff", err, raise_on_error)
 
 
@@ -208,12 +211,12 @@ def get_diff(
         if code != 0:
             raise ToolExecutionException(f"git diff failed: {stderr.strip() or stdout.strip()}")
 
-        content, truncated = truncate_output(stdout, max_bytes=settings.MAX_TOOL_OUTPUT_BYTES)
+        content, truncated = truncate_output(stdout)
         metadata = {
             "cached": cached,
             "truncated": truncated,
             "byte_count": len(content.encode("utf-8")),
         }
         return ToolResult.ok(tool_name="get_diff", output=content, metadata=metadata)
-    except Exception as err:
+    except Exception as err:  # noqa: BLE001
         return _handle_git_error("get_diff", err, raise_on_error)

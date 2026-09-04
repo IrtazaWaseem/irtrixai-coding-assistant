@@ -6,8 +6,13 @@ import uuid
 from pathlib import Path
 
 from app.core.config import settings
-from app.core.constants import IGNORED_DIRECTORIES, IGNORED_FILES
-from app.core.exceptions import ToolExecutionException
+from app.core.constants import IGNORED_DIRECTORIES, IGNORED_FILES, is_protected_file
+from app.core.exceptions import (
+    AppException,
+    EntityNotFoundException,
+    SecurityViolationException,
+    ToolExecutionException,
+)
 from app.tools.base import ToolResult
 from app.tools.schemas import (
     ApplyPatchOutput,
@@ -22,6 +27,7 @@ from app.tools.validators import (
     truncate_output,
     validate_content_size,
     validate_file_size,
+    validate_not_protected,
     validate_safe_path,
     validate_workspace_dir,
 )
@@ -86,10 +92,21 @@ def list_files(
                     truncated = True
                     break
 
-                if item.name in IGNORED_DIRECTORIES or item.name in IGNORED_FILES:
+                if (
+                    item.name in IGNORED_DIRECTORIES
+                    or item.name in IGNORED_FILES
+                    or is_protected_file(item.name)
+                ):
                     continue
 
-                safe_child = validate_safe_path(base_dir, item.path)
+                try:
+                    safe_child = validate_safe_path(base_dir, item.path, must_exist=False)
+                    if is_protected_file(safe_child):
+                        continue
+                except SecurityViolationException:
+                    # Robust symlink handling: skip unsafe entries without aborting listing
+                    continue
+
                 rel_path = str(safe_child.relative_to(base_dir)).replace("\\", "/")
 
                 if item.is_dir(follow_symlinks=False):
@@ -110,7 +127,7 @@ def list_files(
             truncated=truncated,
         )
         return ToolResult.ok(tool_name="list_files", output=result_data.model_dump())
-    except Exception as err:
+    except Exception as err:  # noqa: BLE001
         return _handle_tool_error("list_files", err, raise_on_error)
 
 
@@ -125,11 +142,12 @@ def read_file(
     try:
         base_dir = validate_workspace_dir(workspace_root)
         safe_file = validate_safe_path(base_dir, path, must_exist=True)
+        validate_not_protected(path, safe_file)
 
         if safe_file.is_dir():
             raise ToolExecutionException(f"Path '{path}' is a directory, not a file.")
 
-        validate_file_size(safe_file, max_bytes=settings.MAX_READ_FILE_BYTES)
+        validate_file_size(safe_file)
 
         with safe_file.open("rb") as f:
             header = f.read(8192)
@@ -174,9 +192,7 @@ def read_file(
 
         sliced_lines = all_lines[start_idx:end_idx]
         sliced_content = "\n".join(sliced_lines)
-        final_content, was_truncated = truncate_output(
-            sliced_content, max_bytes=settings.MAX_TOOL_OUTPUT_BYTES
-        )
+        final_content, was_truncated = truncate_output(sliced_content)
 
         result_data = ReadFileOutput(
             path=rel_path,
@@ -188,7 +204,7 @@ def read_file(
             has_more=(end_idx < total_lines) or was_truncated,
         )
         return ToolResult.ok(tool_name="read_file", output=result_data.model_dump())
-    except Exception as err:
+    except Exception as err:  # noqa: BLE001
         return _handle_tool_error("read_file", err, raise_on_error)
 
 
@@ -210,6 +226,9 @@ def search_code(
         if not target_dir.is_dir():
             raise ToolExecutionException(f"Search path '{relative_path}' is not a directory.")
 
+        max_matches = settings.MAX_SEARCH_RESULTS
+        max_file_size = settings.MAX_SEARCH_FILE_SIZE
+
         query_lower = query.lower()
         matches: list[SearchMatch] = []
         truncated = False
@@ -219,26 +238,38 @@ def search_code(
             files.sort()
 
             for file in files:
-                if len(matches) >= settings.MAX_SEARCH_RESULTS:
+                if len(matches) >= max_matches:
                     truncated = True
                     break
 
-                if file in IGNORED_FILES:
+                if file in IGNORED_FILES or is_protected_file(file):
                     continue
 
                 if file_pattern and not fnmatch.fnmatch(file, file_pattern):
                     continue
 
-                abs_file = Path(root) / file
-                rel_path = str(abs_file.relative_to(base_dir)).replace("\\", "/")
+                raw_file_path = Path(root) / file
 
                 try:
-                    if abs_file.stat().st_size > settings.MAX_SEARCH_FILE_SIZE:
+                    safe_file = validate_safe_path(base_dir, raw_file_path, must_exist=True)
+                except (SecurityViolationException, EntityNotFoundException, AppException):
+                    continue
+
+                if is_protected_file(safe_file):
+                    continue
+
+                if not safe_file.is_file():
+                    continue
+
+                rel_path = str(safe_file.relative_to(base_dir)).replace("\\", "/")
+
+                try:
+                    if safe_file.stat().st_size > max_file_size:
                         continue
-                    with abs_file.open("rb") as f:
+                    with safe_file.open("rb") as f:
                         if b"\x00" in f.read(2048):
                             continue
-                    file_text = abs_file.read_text(encoding="utf-8", errors="ignore")
+                    file_text = safe_file.read_text(encoding="utf-8", errors="ignore")
                 except OSError:
                     continue
 
@@ -251,7 +282,7 @@ def search_code(
                                 line_content=line[:250].strip(),
                             )
                         )
-                        if len(matches) >= settings.MAX_SEARCH_RESULTS:
+                        if len(matches) >= max_matches:
                             truncated = True
                             break
 
@@ -265,7 +296,7 @@ def search_code(
             truncated=truncated,
         )
         return ToolResult.ok(tool_name="search_code", output=result_data.model_dump())
-    except Exception as err:
+    except Exception as err:  # noqa: BLE001
         return _handle_tool_error("search_code", err, raise_on_error)
 
 
@@ -279,6 +310,7 @@ def write_file(
     try:
         base_dir = validate_workspace_dir(workspace_root)
         safe_file = validate_safe_path(base_dir, path, must_exist=False)
+        validate_not_protected(path, safe_file)
 
         if safe_file.exists() and safe_file.is_dir():
             raise ToolExecutionException(
@@ -295,6 +327,15 @@ def write_file(
         temp_file = safe_file.parent / f".tmp_{uuid.uuid4().hex}"
         try:
             temp_file.write_text(content, encoding="utf-8")
+
+            # TOCTOU mitigation: Re-verify boundary containment and target identity
+            rechecked_path = validate_safe_path(base_dir, path, must_exist=False)
+            if rechecked_path.resolve() != safe_file.resolve():
+                raise ToolExecutionException(
+                    f"Path target changed concurrently during write for '{path}'."
+                )
+            validate_not_protected(path, rechecked_path)
+
             temp_file.replace(safe_file)
         finally:
             if temp_file.exists():
@@ -307,7 +348,7 @@ def write_file(
             is_new_file=is_new,
         )
         return ToolResult.ok(tool_name="write_file", output=result_data.model_dump())
-    except Exception as err:
+    except Exception as err:  # noqa: BLE001
         return _handle_tool_error("write_file", err, raise_on_error)
 
 
@@ -321,6 +362,7 @@ def apply_patch(
     try:
         base_dir = validate_workspace_dir(workspace_root)
         safe_file = validate_safe_path(base_dir, path, must_exist=True)
+        validate_not_protected(path, safe_file)
 
         if safe_file.is_dir():
             raise ToolExecutionException(f"Path '{path}' is a directory, not a file.")
@@ -334,7 +376,7 @@ def apply_patch(
         new_content = original_content
 
         newline = "\r\n" if "\r\n" in original_content else "\n"
-        ends_with_newline = original_content.endswith("\n") or original_content.endswith("\r\n")
+        ends_with_newline = original_content.endswith(("\n", "\r\n"))
 
         # Strategy 1: Search-and-replace block format
         if "<<<<<<< SEARCH" in patch_content and ">>>>>>> REPLACE" in patch_content:
@@ -426,6 +468,15 @@ def apply_patch(
         temp_file = safe_file.parent / f".tmp_{uuid.uuid4().hex}"
         try:
             temp_file.write_text(new_content, encoding="utf-8")
+
+            # TOCTOU mitigation: Re-verify boundary containment and target identity
+            rechecked_path = validate_safe_path(base_dir, path, must_exist=True)
+            if rechecked_path.resolve() != safe_file.resolve():
+                raise ToolExecutionException(
+                    f"Path target changed concurrently during patch application for '{path}'."
+                )
+            validate_not_protected(path, rechecked_path)
+
             temp_file.replace(safe_file)
         finally:
             if temp_file.exists():
@@ -439,7 +490,7 @@ def apply_patch(
             applied=True,
         )
         return ToolResult.ok(tool_name="apply_patch", output=result_data.model_dump())
-    except Exception as err:
+    except Exception as err:  # noqa: BLE001
         return _handle_tool_error(
             "apply_patch", err, raise_on_error, metadata={"original_preserved": True}
         )

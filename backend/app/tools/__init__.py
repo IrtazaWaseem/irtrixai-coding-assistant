@@ -1,3 +1,5 @@
+from app.core.constants import is_protected_file
+from app.core.exceptions import ProtectedFileAccessViolationException
 from app.tools.base import ToolResult
 from app.tools.file_tools import (
     apply_patch,
@@ -29,6 +31,7 @@ from app.tools.validators import (
     validate_allowed_operation,
     validate_content_size,
     validate_file_size,
+    validate_not_protected,
     validate_safe_path,
     validate_workspace_dir,
 )
@@ -39,6 +42,7 @@ __all__ = [
     "GitStagedItem",
     "GitStatusOutput",
     "ListFilesOutput",
+    "ProtectedFileAccessViolationException",
     "ReadFileOutput",
     "SearchCodeOutput",
     "SearchMatch",
@@ -49,6 +53,7 @@ __all__ = [
     "get_diff",
     "git_diff",
     "git_status",
+    "is_protected_file",
     "list_files",
     "read_file",
     "search_code",
@@ -57,6 +62,7 @@ __all__ = [
     "validate_allowed_operation",
     "validate_content_size",
     "validate_file_size",
+    "validate_not_protected",
     "validate_safe_path",
     "validate_workspace_dir",
     "write_file",

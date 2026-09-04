@@ -1,5 +1,8 @@
 """Central constants shared across application layers."""
 
+import fnmatch
+from pathlib import Path
+
 IGNORED_DIRECTORIES: set[str] = {
     ".git",
     ".hg",
@@ -26,3 +29,24 @@ IGNORED_FILES: set[str] = {
     "desktop.ini",
     ".env",
 }
+
+PROTECTED_FILES: set[str] = {
+    ".env",
+}
+
+PROTECTED_PATTERNS: set[str] = {
+    ".env",
+    ".env.*",
+    "*.pem",
+    "*.key",
+    "id_rsa",
+    "id_ed25519",
+}
+
+
+def is_protected_file(path: str | Path) -> bool:
+    """Checks whether a file path or filename matches protected secret policies."""
+    filename = Path(path).name
+    if filename in PROTECTED_FILES:
+        return True
+    return any(fnmatch.fnmatch(filename, pattern) for pattern in PROTECTED_PATTERNS)

@@ -2,10 +2,12 @@ import contextvars
 from pathlib import Path
 
 from app.core.config import settings
+from app.core.constants import is_protected_file
 from app.core.exceptions import (
     AppException,
     EntityNotFoundException,
     FileSizeLimitExceededException,
+    ProtectedFileAccessViolationException,
     ToolExecutionException,
 )
 from app.core.security import resolve_safe_path
@@ -34,13 +36,13 @@ def validate_workspace_dir(workspace_root: str | Path | None = None) -> Path:
     root = Path(workspace_root).resolve()
     if not root.exists():
         raise AppException(
-            f"Workspace directory '{workspace_root}' does not exist.",
+            "Workspace directory does not exist.",
             status_code=404,
             details={"workspace_root": str(workspace_root)},
         )
     if not root.is_dir():
         raise AppException(
-            f"Workspace path '{workspace_root}' is not a directory.",
+            "Workspace path is not a directory.",
             status_code=400,
             details={"workspace_root": str(workspace_root)},
         )
@@ -52,11 +54,7 @@ def validate_safe_path(
     target_path: str | Path,
     must_exist: bool = False,
 ) -> Path:
-    """Validates that target_path resolves strictly within workspace_root.
-
-    Delegates path normalization, parent directory traversal (../), absolute escapes,
-    and symlink resolution directly to `resolve_safe_path`.
-    """
+    """Validates that target_path resolves strictly within workspace_root."""
     root = validate_workspace_dir(workspace_root)
     safe_path = resolve_safe_path(root, target_path)
 
@@ -66,29 +64,43 @@ def validate_safe_path(
     return safe_path
 
 
+def validate_not_protected(
+    target_path: str | Path,
+    resolved_path: Path | None = None,
+) -> None:
+    """Ensures neither the requested path nor the resolved file is protected."""
+    if is_protected_file(target_path):
+        raise ProtectedFileAccessViolationException(str(target_path))
+    if resolved_path is not None and is_protected_file(resolved_path):
+        raise ProtectedFileAccessViolationException(str(target_path))
+
+
 def validate_file_size(
     file_path: Path,
-    max_bytes: int = settings.MAX_READ_FILE_BYTES,
+    max_bytes: int | None = None,
 ) -> int:
     """Ensures target file is a regular file and does not exceed maximum byte size."""
+    if max_bytes is None:
+        max_bytes = settings.MAX_READ_FILE_BYTES
+
     if not file_path.is_file():
         raise AppException(
-            f"Path '{file_path}' is not a regular file.",
+            f"Path '{file_path.name}' is not a regular file.",
             status_code=400,
-            details={"path": str(file_path)},
+            details={"path": file_path.name},
         )
     try:
         size = file_path.stat().st_size
     except OSError as err:
         raise AppException(
-            f"Failed to access file metadata for '{file_path}': {err}",
+            f"Failed to access file metadata for '{file_path.name}': {err}",
             status_code=400,
         ) from err
 
     if size > max_bytes:
         raise FileSizeLimitExceededException(
             f"File size ({size} bytes) exceeds limit of {max_bytes} bytes.",
-            details={"size": size, "max_bytes": max_bytes, "file_path": str(file_path)},
+            details={"size": size, "max_bytes": max_bytes, "file_path": file_path.name},
         )
     return size
 
@@ -110,9 +122,12 @@ def validate_content_size(
 
 def truncate_output(
     content: str,
-    max_bytes: int = settings.MAX_TOOL_OUTPUT_BYTES,
+    max_bytes: int | None = None,
 ) -> tuple[str, bool]:
     """Truncates string content cleanly if UTF-8 representation exceeds max_bytes."""
+    if max_bytes is None:
+        max_bytes = settings.MAX_TOOL_OUTPUT_BYTES
+
     encoded = content.encode("utf-8")
     if len(encoded) <= max_bytes:
         return content, False

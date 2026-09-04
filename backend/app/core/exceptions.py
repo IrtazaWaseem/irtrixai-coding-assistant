@@ -2,14 +2,14 @@ from typing import Any
 
 
 class AppException(Exception):
-    """Base application exception for all domain errors."""
+    """Base application exception with structured error payload."""
 
     def __init__(
         self,
         message: str,
         status_code: int = 500,
         details: dict[str, Any] | None = None,
-    ):
+    ) -> None:
         super().__init__(message)
         self.message = message
         self.status_code = status_code
@@ -17,45 +17,59 @@ class AppException(Exception):
 
 
 class EntityNotFoundException(AppException):
-    def __init__(self, entity_name: str, entity_id: str):
+    def __init__(self, entity_name: str, identifier: str) -> None:
         super().__init__(
-            message=f"{entity_name} with id '{entity_id}' not found.",
+            message=f"{entity_name} '{identifier}' not found.",
             status_code=404,
-            details={"entity_name": entity_name, "entity_id": entity_id},
+            details={"entity": entity_name, "identifier": identifier},
         )
 
 
 class SecurityViolationException(AppException):
-    def __init__(self, message: str, details: dict[str, Any] | None = None):
-        super().__init__(
-            message=message,
-            status_code=403,
-            details=details or {},
-        )
+    def __init__(
+        self,
+        message: str = "Access denied: security boundary violation.",
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message=message, status_code=403, details=details or {})
+
+
+class ProtectedFileAccessViolationException(SecurityViolationException):
+    """Raised when an operation attempts to access or mutate a protected secret file."""
+
+    def __init__(self, path: str, message: str | None = None) -> None:
+        msg = message or f"Access denied: path '{path}' is protected."
+        super().__init__(message=msg, details={"path": str(path), "protected": True})
+
+
+class FileSizeLimitExceededException(AppException):
+    def __init__(self, message: str, details: dict[str, Any] | None = None) -> None:
+        super().__init__(message=message, status_code=413, details=details or {})
 
 
 class ExecutionTimeoutException(AppException):
-    def __init__(self, timeout_seconds: int, command: str | None = None):
+    def __init__(
+        self,
+        timeout_seconds: int,
+        command: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        info = details or {}
+        info["timeout_seconds"] = timeout_seconds
+        if command:
+            info["command"] = command
         super().__init__(
-            message=f"Command execution timed out after {timeout_seconds} seconds.",
-            status_code=504,
-            details={"timeout_seconds": timeout_seconds, "command": command},
+            message=f"Command execution timed out after {timeout_seconds}s.",
+            status_code=408,
+            details=info,
         )
 
 
 class ToolExecutionException(AppException):
-    def __init__(self, message: str, details: dict[str, Any] | None = None):
-        super().__init__(
-            message=message,
-            status_code=400,
-            details=details or {},
-        )
-
-
-class FileSizeLimitExceededException(AppException):
-    def __init__(self, message: str, details: dict[str, Any] | None = None):
-        super().__init__(
-            message=message,
-            status_code=413,
-            details=details or {},
-        )
+    def __init__(
+        self,
+        message: str,
+        status_code: int = 400,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message=message, status_code=status_code, details=details or {})
