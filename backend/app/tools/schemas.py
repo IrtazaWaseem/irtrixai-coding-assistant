@@ -64,3 +64,13 @@ class GitStatusOutput(BaseModel):
     untracked: list[str] = Field(default_factory=list)
     deleted: list[str] = Field(default_factory=list)
     staged: list[GitStagedItem] = Field(default_factory=list)
+
+
+# --- Execution Schemas ---
+class RunCommandOutput(BaseModel):
+    command: str
+    exit_code: int
+    stdout: str
+    stderr: str
+    truncated: bool
+    duration_seconds: float | None = None

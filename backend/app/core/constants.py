@@ -43,6 +43,27 @@ PROTECTED_PATTERNS: set[str] = {
     "id_ed25519",
 }
 
+ALLOWLISTED_EXECUTABLES: set[str] = {
+    "python",
+    "python3",
+    "pytest",
+    "ruff",
+}
+
+FORBIDDEN_COMMAND_TOKENS: set[str] = {
+    "|",
+    ";",
+    "&",
+    "&&",
+    "||",
+    "`",
+    "$",
+    "<",
+    ">",
+    ">>",
+    "2>",
+}
+
 
 def is_protected_file(path: str | Path) -> bool:
     """Checks whether a file path or filename matches protected secret policies."""

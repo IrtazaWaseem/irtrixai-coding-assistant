@@ -1,6 +1,13 @@
-from app.core.constants import is_protected_file
-from app.core.exceptions import ProtectedFileAccessViolationException
+from app.core.constants import ALLOWLISTED_EXECUTABLES, FORBIDDEN_COMMAND_TOKENS, is_protected_file
+from app.core.exceptions import (
+    ContainerExecutionException,
+    ContainerTimeoutException,
+    DisallowedCommandException,
+    ProtectedFileAccessViolationException,
+)
+from app.services.execution_service import ExecutionService
 from app.tools.base import ToolResult
+from app.tools.execution_tools import run_command
 from app.tools.file_tools import (
     apply_patch,
     list_files,
@@ -20,6 +27,7 @@ from app.tools.schemas import (
     GitStatusOutput,
     ListFilesOutput,
     ReadFileOutput,
+    RunCommandOutput,
     SearchCodeOutput,
     SearchMatch,
     WriteFileOutput,
@@ -29,6 +37,7 @@ from app.tools.validators import (
     set_current_workspace,
     truncate_output,
     validate_allowed_operation,
+    validate_command,
     validate_content_size,
     validate_file_size,
     validate_not_protected,
@@ -37,13 +46,20 @@ from app.tools.validators import (
 )
 
 __all__ = [
+    "ALLOWLISTED_EXECUTABLES",
+    "FORBIDDEN_COMMAND_TOKENS",
     "ApplyPatchOutput",
+    "ContainerExecutionException",
+    "ContainerTimeoutException",
+    "DisallowedCommandException",
+    "ExecutionService",
     "FileEntry",
     "GitStagedItem",
     "GitStatusOutput",
     "ListFilesOutput",
     "ProtectedFileAccessViolationException",
     "ReadFileOutput",
+    "RunCommandOutput",
     "SearchCodeOutput",
     "SearchMatch",
     "ToolResult",
@@ -56,10 +72,12 @@ __all__ = [
     "is_protected_file",
     "list_files",
     "read_file",
+    "run_command",
     "search_code",
     "set_current_workspace",
     "truncate_output",
     "validate_allowed_operation",
+    "validate_command",
     "validate_content_size",
     "validate_file_size",
     "validate_not_protected",

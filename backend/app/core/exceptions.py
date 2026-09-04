@@ -42,6 +42,17 @@ class ProtectedFileAccessViolationException(SecurityViolationException):
         super().__init__(message=msg, details={"path": str(path), "protected": True})
 
 
+class DisallowedCommandException(SecurityViolationException):
+    """Raised when a command violates the sandbox executable allowlist or syntax rules."""
+
+    def __init__(
+        self,
+        message: str = "Command execution rejected by policy.",
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message=message, details=details)
+
+
 class FileSizeLimitExceededException(AppException):
     def __init__(self, message: str, details: dict[str, Any] | None = None) -> None:
         super().__init__(message=message, status_code=413, details=details or {})
@@ -65,11 +76,35 @@ class ExecutionTimeoutException(AppException):
         )
 
 
+class ContainerTimeoutException(ExecutionTimeoutException):
+    """Raised when container execution exceeds configured timeout limit."""
+
+    def __init__(
+        self,
+        timeout_seconds: int,
+        command: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(timeout_seconds=timeout_seconds, command=command, details=details)
+
+
 class ToolExecutionException(AppException):
     def __init__(
         self,
         message: str,
         status_code: int = 400,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message=message, status_code=status_code, details=details or {})
+
+
+class ContainerExecutionException(AppException):
+    """Raised when Docker container operations fail."""
+
+    def __init__(
+        self,
+        message: str,
+        status_code: int = 500,
         details: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(message=message, status_code=status_code, details=details or {})
