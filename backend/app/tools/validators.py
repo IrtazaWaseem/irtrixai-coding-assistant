@@ -14,6 +14,7 @@ from app.core.security import (
     resolve_safe_path,
     truncate_output,
     validate_command,
+    validate_workspace_path,
 )
 
 _current_workspace_root: contextvars.ContextVar[Path | None] = contextvars.ContextVar(
@@ -37,20 +38,7 @@ def validate_workspace_dir(workspace_root: str | Path | None = None) -> Path:
         ctx_root = get_current_workspace()
         workspace_root = ctx_root if ctx_root is not None else settings.WORKSPACE_BASE_PATH
 
-    root = Path(workspace_root).resolve()
-    if not root.exists():
-        raise AppException(
-            "Workspace directory does not exist.",
-            status_code=404,
-            details={"workspace_root": str(workspace_root)},
-        )
-    if not root.is_dir():
-        raise AppException(
-            "Workspace path is not a directory.",
-            status_code=400,
-            details={"workspace_root": str(workspace_root)},
-        )
-    return root
+    return validate_workspace_path(workspace_root)
 
 
 def validate_safe_path(
@@ -146,4 +134,5 @@ __all__ = [
     "validate_not_protected",
     "validate_safe_path",
     "validate_workspace_dir",
+    "validate_workspace_path",
 ]

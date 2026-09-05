@@ -3,7 +3,57 @@ from pathlib import Path
 
 from app.core.config import settings
 from app.core.constants import ALLOWLISTED_EXECUTABLES, FORBIDDEN_COMMAND_TOKENS
-from app.core.exceptions import DisallowedCommandException, SecurityViolationException
+from app.core.exceptions import (
+    AppException,
+    DisallowedCommandException,
+    SecurityViolationException,
+)
+
+
+def validate_workspace_path(
+    workspace_path: str | Path,
+    trusted_base: str | Path | None = None,
+) -> Path:
+    """Validates that a workspace path exists, is a directory, and resolves within trusted boundaries.
+
+    Guarantees:
+    1. Path is not empty.
+    2. Path exists and is a directory.
+    3. If trusted_base is provided (or if checking against allowed base boundaries),
+       resolves safely without escaping via traversal or symlinks.
+    4. Real path is strictly verified.
+    """
+    if not workspace_path:
+        raise AppException("Workspace path cannot be empty.", status_code=400)
+
+    raw_path = Path(workspace_path)
+    try:
+        resolved = raw_path.resolve(strict=True)
+    except (FileNotFoundError, OSError) as err:
+        raise AppException(
+            f"Workspace directory does not exist: '{workspace_path}'",
+            status_code=404,
+            details={"workspace_path": str(workspace_path)},
+        ) from err
+
+    if not resolved.is_dir():
+        raise AppException(
+            f"Workspace path is not a directory: '{workspace_path}'",
+            status_code=400,
+            details={"workspace_path": str(workspace_path)},
+        )
+
+    if trusted_base is not None:
+        base = Path(trusted_base).resolve()
+        try:
+            resolved.relative_to(base)
+        except ValueError:
+            raise SecurityViolationException(
+                f"Access denied: path '{workspace_path}' escapes workspace boundary.",
+                details={"workspace_path": str(workspace_path)},
+            )
+
+    return resolved
 
 
 def resolve_safe_path(base_directory: str | Path, target_path: str | Path) -> Path:

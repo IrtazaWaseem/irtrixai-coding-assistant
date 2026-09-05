@@ -6,10 +6,15 @@ from pathlib import Path
 
 from app.core.config import settings
 from app.core.exceptions import (
+    AppException,
     ContainerExecutionException,
     ContainerTimeoutException,
 )
-from app.core.security import truncate_output, validate_command
+from app.core.security import (
+    resolve_safe_path,
+    truncate_output,
+    validate_command,
+)
 
 
 class ExecutionService:
@@ -53,7 +58,7 @@ class ExecutionService:
             "--read-only",
             f"--tmpfs=/tmp:rw,noexec,nosuid,size={settings.SANDBOX_TMPFS_SIZE}",
             "--workdir=/workspace",
-            f"--volume={workspace_path.resolve()!s}:/workspace:ro",
+            f"--volume={workspace_path!s}:/workspace:ro",
             "--env=PATH=/usr/local/bin:/usr/bin:/bin",
             "--env=TMPDIR=/tmp",
             "--env=TEMP=/tmp",
@@ -230,21 +235,54 @@ class ExecutionService:
     def execute_in_sandbox(
         self,
         command: str | list[str],
-        workspace_path: Path,
+        workspace_path: str | Path,
         timeout_seconds: int,
         image: str | None = None,
+        trusted_base: str | Path | None = None,
     ) -> dict:
         """Coordinates full container lifecycle for command execution."""
-        # Enforce validation boundary internally for all callers
+        # 1. Workspace validation boundary
+        if not workspace_path:
+            raise AppException("Workspace path cannot be empty.", status_code=400)
+
+        raw_path = Path(workspace_path)
+        if trusted_base is not None:
+            validated_workspace = resolve_safe_path(trusted_base, raw_path)
+        else:
+            try:
+                validated_workspace = raw_path.resolve(strict=True)
+            except (FileNotFoundError, OSError) as err:
+                raise AppException(
+                    f"Workspace directory does not exist: '{workspace_path}'",
+                    status_code=404,
+                    details={"workspace_path": str(workspace_path)},
+                ) from err
+
+        if not validated_workspace.exists():
+            raise AppException(
+                f"Workspace directory does not exist: '{workspace_path}'",
+                status_code=404,
+                details={"workspace_path": str(workspace_path)},
+            )
+
+        if not validated_workspace.is_dir():
+            raise AppException(
+                f"Workspace path is not a directory: '{workspace_path}'",
+                status_code=400,
+                details={"workspace_path": str(workspace_path)},
+            )
+
+        # 2. Command validation boundary
         validated_argv = validate_command(command)
 
+        # 3. Docker execution
         container_id: str | None = None
         start_time = time.perf_counter()
 
         try:
             container_id = self._create_container(
                 argv=validated_argv,
-                workspace_path=workspace_path,
+                workspace_path=validated_workspace,
                 image=image,
             )
             self._start_container(container_id)

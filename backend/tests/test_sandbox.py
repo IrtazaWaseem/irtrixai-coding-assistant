@@ -4,11 +4,13 @@ import os
 import subprocess
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
 from app.core.config import settings
 from app.core.exceptions import (
+    AppException,
     DisallowedCommandException,
     SecurityViolationException,
 )
@@ -58,14 +60,13 @@ def docker_ready():
     pytest.skip(f"Neither '{settings.DOCKER_SANDBOX_IMAGE}' nor 'python:3.12-slim' is available.")
 
 
-# --- Issue 1 Regression Test: Service Boundary Enforcement ---
+# --- Regression Tests: Direct Service Boundary Enforcement ---
 
 
 def test_execution_service_direct_caller_security(sandbox_workspace):
-    """Verifies that direct callers of ExecutionService cannot bypass command policy."""
+    """Verifies direct callers of ExecutionService cannot bypass command policy."""
     service = ExecutionService()
 
-    # 1. Non-allowlisted binary passed as token list
     with pytest.raises(DisallowedCommandException):
         service.execute_in_sandbox(
             command=["bash", "-c", "whoami"],
@@ -73,7 +74,6 @@ def test_execution_service_direct_caller_security(sandbox_workspace):
             timeout_seconds=5,
         )
 
-    # 2. Path-prefixed relative binary
     with pytest.raises(DisallowedCommandException):
         service.execute_in_sandbox(
             command=["./python", "-c", "print(1)"],
@@ -81,7 +81,6 @@ def test_execution_service_direct_caller_security(sandbox_workspace):
             timeout_seconds=5,
         )
 
-    # 3. Absolute path binary
     with pytest.raises(DisallowedCommandException):
         service.execute_in_sandbox(
             command=["/usr/bin/python", "-c", "print(1)"],
@@ -89,7 +88,6 @@ def test_execution_service_direct_caller_security(sandbox_workspace):
             timeout_seconds=5,
         )
 
-    # 4. Injected shell chaining token
     with pytest.raises(DisallowedCommandException):
         service.execute_in_sandbox(
             command=["python", ";", "rm", "-rf", "/"],
@@ -97,13 +95,85 @@ def test_execution_service_direct_caller_security(sandbox_workspace):
             timeout_seconds=5,
         )
 
-    # 5. Non-allowlisted string command
     with pytest.raises(DisallowedCommandException):
         service.execute_in_sandbox(
             command="curl http://malicious.com",
             workspace_path=sandbox_workspace,
             timeout_seconds=5,
         )
+
+
+def test_execution_service_direct_workspace_validation(sandbox_workspace, tmp_path):
+    """Verifies direct callers of ExecutionService cannot bypass workspace path validation."""
+    service = ExecutionService()
+
+    # 1. Nonexistent directory is rejected before Docker
+    with patch.object(service, "_create_container") as mock_create:
+        with pytest.raises(AppException) as exc_info:
+            service.execute_in_sandbox(
+                command='python -c "print(1)"',
+                workspace_path=tmp_path / "does_not_exist",
+                timeout_seconds=5,
+            )
+        assert exc_info.value.status_code == 404
+        mock_create.assert_not_called()
+
+    # 2. Regular file target is rejected before Docker
+    file_target = sandbox_workspace / "main.py"
+    with patch.object(service, "_create_container") as mock_create:
+        with pytest.raises(AppException) as exc_info:
+            service.execute_in_sandbox(
+                command='python -c "print(1)"',
+                workspace_path=file_target,
+                timeout_seconds=5,
+            )
+        assert exc_info.value.status_code == 400
+        mock_create.assert_not_called()
+
+    # 3. Traversal / Boundary escape rejected before Docker
+    outside_dir = tmp_path / "outside_dir"
+    outside_dir.mkdir()
+    with patch.object(service, "_create_container") as mock_create:
+        with pytest.raises(SecurityViolationException):
+            service.execute_in_sandbox(
+                command='python -c "print(1)"',
+                workspace_path=outside_dir,
+                timeout_seconds=5,
+                trusted_base=sandbox_workspace,
+            )
+        mock_create.assert_not_called()
+
+    # 4. Symlink escape rejected before Docker
+    symlink_dir = sandbox_workspace / "symlink_escape"
+    try:
+        os.symlink(outside_dir, symlink_dir)
+        with patch.object(service, "_create_container") as mock_create:
+            with pytest.raises(SecurityViolationException):
+                service.execute_in_sandbox(
+                    command='python -c "print(1)"',
+                    workspace_path=symlink_dir,
+                    timeout_seconds=5,
+                    trusted_base=sandbox_workspace,
+                )
+            mock_create.assert_not_called()
+    except OSError:
+        pass
+
+    # 5. Valid workspace succeeds
+    with (
+        patch.object(service, "_create_container", return_value="dummy_cid") as mock_create,
+        patch.object(service, "_start_container"),
+        patch.object(service, "_wait_container", return_value=0),
+        patch.object(service, "_collect_bounded_logs", return_value=("ok", "", False)),
+        patch.object(service, "_cleanup_container"),
+    ):
+        res = service.execute_in_sandbox(
+            command='python -c "print(1)"',
+            workspace_path=sandbox_workspace,
+            timeout_seconds=5,
+        )
+        assert res["exit_code"] == 0
+        mock_create.assert_called_once()
 
 
 # --- Public Command Policy & Shell Security Tests ---
@@ -173,12 +243,11 @@ def test_workspace_traversal_guards(sandbox_workspace):
     assert res_missing.success is False
 
 
-# --- Issue 3: Live Docker Verification Tests ---
+# --- Live Docker Verification Tests ---
 
 
 def test_docker_live_basic_execution_and_tools(sandbox_workspace, docker_ready):
     """Verifies basic execution, pytest, and ruff availability in sandbox image."""
-    # 1. Basic python execution
     res = run_command(
         "python -c \"print('hello')\"",
         workspace_root=sandbox_workspace,
@@ -188,7 +257,6 @@ def test_docker_live_basic_execution_and_tools(sandbox_workspace, docker_ready):
     assert res.output["exit_code"] == 0
     assert "hello" in res.output["stdout"]
 
-    # 2. Pytest tool availability
     res_pytest = run_command(
         "pytest --version", workspace_root=sandbox_workspace, image=docker_ready
     )
@@ -196,7 +264,6 @@ def test_docker_live_basic_execution_and_tools(sandbox_workspace, docker_ready):
     assert res_pytest.output["exit_code"] == 0
     assert "pytest" in (res_pytest.output["stdout"] + res_pytest.output["stderr"]).lower()
 
-    # 3. Ruff tool availability
     res_ruff = run_command("ruff --version", workspace_root=sandbox_workspace, image=docker_ready)
     assert res_ruff.success is True
     assert res_ruff.output["exit_code"] == 0
