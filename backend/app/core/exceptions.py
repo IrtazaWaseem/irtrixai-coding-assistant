@@ -108,3 +108,128 @@ class ContainerExecutionException(AppException):
         details: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(message=message, status_code=status_code, details=details or {})
+
+
+# --- LLM Gateway & Provider Exceptions ---
+
+
+class LLMException(AppException):
+    """Base exception for all LLM gateway and provider errors."""
+
+    def __init__(
+        self,
+        message: str,
+        status_code: int = 502,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message, status_code=status_code, details=details)
+
+
+class LLMConfigurationException(LLMException):
+    """Raised when LLM configuration or provider selection is invalid."""
+
+    def __init__(
+        self,
+        message: str,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message, status_code=500, details=details)
+
+
+class LLMAuthenticationException(LLMException):
+    """Raised when provider authentication fails or required API key is missing."""
+
+    def __init__(
+        self,
+        message: str = "LLM provider authentication failed.",
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message, status_code=401, details=details)
+
+
+class LLMInvalidModelException(LLMException):
+    """Raised when a model identifier is empty or rejected."""
+
+    def __init__(
+        self,
+        message: str,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message, status_code=400, details=details)
+
+
+class LLMProviderUnavailableException(LLMException):
+    """Raised when downstream LLM provider service is unreachable."""
+
+    def __init__(
+        self,
+        message: str = "LLM provider service is currently unavailable.",
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message, status_code=503, details=details)
+
+
+class LLMConnectionException(LLMException):
+    """Raised when network transport connection to provider fails."""
+
+    def __init__(
+        self,
+        message: str = "Failed to connect to LLM provider endpoint.",
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message, status_code=503, details=details)
+
+
+class LLMTimeoutException(LLMException):
+    """Raised when an LLM provider request exceeds timeout threshold."""
+
+    def __init__(
+        self,
+        message: str = "LLM request timed out.",
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message, status_code=504, details=details)
+
+
+class LLMRateLimitException(LLMException):
+    """Raised when LLM provider rate limit or quota is exceeded."""
+
+    def __init__(
+        self,
+        message: str = "LLM rate limit or quota exceeded.",
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message, status_code=429, details=details)
+
+
+class LLMResponseException(LLMException):
+    """Raised when an LLM response is malformed, truncated, or empty."""
+
+    def __init__(
+        self,
+        message: str,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message, status_code=502, details=details)
+
+
+class LLMUnsupportedCapabilityException(LLMException):
+    """Raised when an operation is attempted that provider/model does not support."""
+
+    def __init__(
+        self,
+        message: str,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message, status_code=400, details=details)
+
+
+class LLMProviderException(LLMException):
+    """Raised when downstream provider encounters an unhandled runtime error."""
+
+    def __init__(
+        self,
+        message: str,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message, status_code=502, details=details)

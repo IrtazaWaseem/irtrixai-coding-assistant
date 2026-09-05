@@ -1,5 +1,6 @@
 from fastapi import APIRouter
 
+from app.api.v1.llm import router as llm_router
 from app.api.v1.workspaces import router as workspaces_router
 
 api_router = APIRouter()
@@ -11,3 +12,4 @@ async def get_v1_status() -> dict[str, str]:
 
 
 api_router.include_router(workspaces_router, prefix="/workspaces", tags=["Workspaces"])
+api_router.include_router(llm_router, prefix="/llm", tags=["LLM"])
