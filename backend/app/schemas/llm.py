@@ -77,9 +77,10 @@ class LLMResponse(BaseModel):
 
 
 class LLMStreamChunk(BaseModel):
-    """Standardized incremental chunk yielded during token streaming."""
+    """Normalized token or text chunk emitted during streaming inference."""
 
     model_config = ConfigDict(frozen=True)
 
-    delta: str = Field(..., description="Incremental text fragment")
-    finish_reason: str | None = Field(default=None, description="Termination reason on final chunk")
+    delta: str = ""
+    finish_reason: str | None = None
+    provider_switched: bool = False

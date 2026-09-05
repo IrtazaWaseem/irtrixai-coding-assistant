@@ -1,5 +1,6 @@
 import json
 from collections.abc import AsyncIterator
+from unittest.mock import MagicMock
 
 import pytest
 from pydantic import BaseModel, Field
@@ -109,6 +110,55 @@ class MockConfigurableProvider(LLMProvider):
         yield LLMStreamChunk(delta=prompt, finish_reason="STOP")
 
 
+class StreamingMockProvider(LLMProvider):
+    """Mock provider with explicit control over when stream exceptions are raised."""
+
+    def __init__(
+        self,
+        config: LLMConfig,
+        chunks: list[str] | None = None,
+        fail_after_chunks: int | None = None,
+        fail_with: Exception | None = None,
+    ) -> None:
+        super().__init__(config)
+        self._chunks = chunks or ["Hello ", "world!"]
+        self._fail_after = fail_after_chunks
+        self._fail_with = fail_with or LLMTimeoutException("Stream interrupted")
+
+    @property
+    def capabilities(self) -> ProviderCapabilities:
+        return ProviderCapabilities(supports_streaming=True)
+
+    def get_model_info(self) -> ModelInfo:
+        return ModelInfo(
+            provider=self.provider_name,
+            model=self.model,
+            display_name=f"Mock ({self.model})",
+            capabilities=self.capabilities,
+        )
+
+    async def generate(self, prompt: str, **kwargs) -> LLMResponse:
+        raise NotImplementedError
+
+    async def generate_structured[T: BaseModel](self, prompt: str, schema: type[T], **kwargs) -> T:
+        raise NotImplementedError
+
+    async def stream(
+        self,
+        prompt: str,
+        *,
+        system_instruction: str | None = None,
+        temperature: float | None = None,
+        max_output_tokens: int | None = None,
+    ) -> AsyncIterator[LLMStreamChunk]:
+        for i, text in enumerate(self._chunks):
+            if self._fail_after is not None and i == self._fail_after:
+                raise self._fail_with
+            yield LLMStreamChunk(delta=text)
+        if self._fail_after is not None and len(self._chunks) == self._fail_after:
+            raise self._fail_with
+
+
 # --- Unit Tests ---
 
 
@@ -155,7 +205,8 @@ def test_gemini_arbitrary_model_accepted():
         model="gemini-2.5-flash-experimental",
         api_key="AIzaSyDummyTestKey",
     )
-    provider = LLMFactory.create_provider(config)
+    mock_client = MagicMock()
+    provider = LLMFactory.create_provider(config, client=mock_client)
     assert isinstance(provider, GeminiProvider)
     assert provider.model == "gemini-2.5-flash-experimental"
 
@@ -206,7 +257,8 @@ def test_api_keys_not_included_in_serialized_config_objects():
     assert secret not in repr(config)
     assert secret not in str(config)
 
-    provider = GeminiProvider(config)
+    mock_client = MagicMock()
+    provider = GeminiProvider(config, client=mock_client)
     info = provider.get_model_info()
     assert secret not in json.dumps(info.model_dump())
 
@@ -279,3 +331,119 @@ async def test_gateway_capability_rejection():
     with pytest.raises(LLMUnsupportedCapabilityException):
         async for _ in gateway_no_stream.stream("test"):
             pass
+
+
+# --- Streaming Fallback Regression Tests (Cases A through D) ---
+
+
+@pytest.mark.asyncio
+async def test_stream_primary_succeeds_no_fallback():
+    """Case A: Primary succeeds with multiple chunks -> no fallback invoked."""
+    primary = StreamingMockProvider(
+        LLMConfig(provider="ollama", model="qwen-gpu-tuned"),
+        chunks=["chunk-1 ", "chunk-2 ", "chunk-3"],
+    )
+    fallback = StreamingMockProvider(
+        LLMConfig(provider="ollama", model="deepseek-r1:8b"),
+        chunks=["fallback-1"],
+    )
+    gateway = LLMGateway(primary_provider=primary, fallback_provider=fallback)
+
+    received = [c async for c in gateway.stream("test")]
+    assert len(received) == 3
+    assert [c.delta for c in received] == ["chunk-1 ", "chunk-2 ", "chunk-3"]
+    assert not any(c.provider_switched for c in received)
+    assert gateway.last_used_provider == "ollama"
+    assert gateway.last_used_model == "qwen-gpu-tuned"
+
+
+@pytest.mark.asyncio
+async def test_stream_primary_fails_before_first_chunk():
+    """Case B: Primary fails before first chunk -> fallback produces normal output without restart signal."""
+    primary = StreamingMockProvider(
+        LLMConfig(provider="gemini", model="gemini-2.5-flash"),
+        fail_after_chunks=0,
+        fail_with=LLMTimeoutException("Timeout before output"),
+    )
+    fallback = StreamingMockProvider(
+        LLMConfig(provider="ollama", model="qwen-gpu-tuned"),
+        chunks=["fallback-chunk-1 ", "fallback-chunk-2"],
+    )
+    gateway = LLMGateway(primary_provider=primary, fallback_provider=fallback)
+
+    received = [c async for c in gateway.stream("test")]
+    assert len(received) == 2
+    assert [c.delta for c in received] == ["fallback-chunk-1 ", "fallback-chunk-2"]
+    assert not any(c.provider_switched for c in received)
+    assert gateway.last_used_provider == "ollama"
+    assert gateway.last_used_model == "qwen-gpu-tuned"
+
+
+@pytest.mark.asyncio
+async def test_stream_primary_partial_failure_signals_restart():
+    """Case C: Primary emits several chunks then fails -> fallback is invoked and emits restart signal."""
+    primary = StreamingMockProvider(
+        LLMConfig(provider="gemini", model="gemini-2.5-flash"),
+        chunks=["primary-1 ", "primary-2 ", "unreachable"],
+        fail_after_chunks=2,
+        fail_with=LLMConnectionException("Connection dropped mid-stream"),
+    )
+    fallback = StreamingMockProvider(
+        LLMConfig(provider="ollama", model="qwen-gpu-tuned"),
+        chunks=["fallback-full-1 ", "fallback-full-2"],
+    )
+    gateway = LLMGateway(primary_provider=primary, fallback_provider=fallback)
+
+    received = [c async for c in gateway.stream("test")]
+    assert len(received) == 5
+
+    # 1. Primary chunks emitted before failure
+    assert received[0].delta == "primary-1 "
+    assert received[0].provider_switched is False
+    assert received[1].delta == "primary-2 "
+    assert received[1].provider_switched is False
+
+    # 2. Explicit restart signal
+    assert received[2].provider_switched is True
+    assert received[2].delta == ""
+
+    # 3. Fallback chunks emitted after restart
+    assert received[3].delta == "fallback-full-1 "
+    assert received[3].provider_switched is False
+    assert received[4].delta == "fallback-full-2"
+    assert received[4].provider_switched is False
+
+    # 4. Caller can cleanly separate partial primary from complete fallback
+    restart_index = next(i for i, c in enumerate(received) if c.provider_switched)
+    primary_partial = "".join(c.delta for c in received[:restart_index])
+    fallback_clean = "".join(c.delta for c in received[restart_index + 1 :])
+    assert primary_partial == "primary-1 primary-2 "
+    assert fallback_clean == "fallback-full-1 fallback-full-2"
+    assert gateway.last_used_provider == "ollama"
+    assert gateway.last_used_model == "qwen-gpu-tuned"
+
+
+@pytest.mark.asyncio
+async def test_stream_fallback_itself_fails():
+    """Case D: Fallback itself fails -> error propagates cleanly without recursion."""
+    primary = StreamingMockProvider(
+        LLMConfig(provider="gemini", model="gemini-2.5-flash"),
+        fail_after_chunks=1,
+        fail_with=LLMTimeoutException("Primary timeout"),
+    )
+    fallback = StreamingMockProvider(
+        LLMConfig(provider="ollama", model="qwen-gpu-tuned"),
+        fail_after_chunks=0,
+        fail_with=LLMProviderUnavailableException("Ollama daemon down"),
+    )
+    gateway = LLMGateway(primary_provider=primary, fallback_provider=fallback)
+
+    received = []
+    with pytest.raises(LLMProviderUnavailableException) as exc_info:
+        async for chunk in gateway.stream("test"):
+            received.append(chunk)
+
+    assert "Ollama daemon down" in str(exc_info.value)
+    assert len(received) == 2
+    assert received[0].delta == "Hello "
+    assert received[1].provider_switched is True

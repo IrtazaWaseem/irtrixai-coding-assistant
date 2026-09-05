@@ -1,6 +1,5 @@
 import logging
 from collections.abc import AsyncIterator
-from typing import TypeVar
 
 from pydantic import BaseModel
 
@@ -17,7 +16,6 @@ from app.services.llm.base import LLMProvider
 from app.services.llm.factory import LLMFactory
 
 logger = logging.getLogger(__name__)
-T = TypeVar("T", bound=BaseModel)
 
 
 class LLMGateway:
@@ -172,12 +170,14 @@ class LLMGateway:
         temperature: float | None = None,
         max_output_tokens: int | None = None,
     ) -> AsyncIterator[LLMStreamChunk]:
+        """Dispatches streaming request with capability validation and restart-signaled fallback."""
         if not self.primary.capabilities.supports_streaming:
             raise LLMUnsupportedCapabilityException(
                 f"Provider '{self.primary.provider_name}' with model '{self.primary.model}' "
                 "does not support streaming."
             )
 
+        yielded_any = False
         try:
             self.last_used_provider = self.primary.provider_name
             self.last_used_model = self.primary.model
@@ -187,6 +187,7 @@ class LLMGateway:
                 temperature=temperature,
                 max_output_tokens=max_output_tokens,
             ):
+                yielded_any = True
                 yield chunk
         except (
             LLMTimeoutException,
@@ -196,13 +197,18 @@ class LLMGateway:
         ) as exc:
             if self.fallback is not None and self.fallback.capabilities.supports_streaming:
                 logger.warning(
-                    "Primary provider '%s' stream failed (%s); triggering fallback stream '%s'",
+                    "Primary provider '%s' stream failed (%s); triggering fallback stream '%s' (yielded_any=%s)",
                     self.primary.provider_name,
                     type(exc).__name__,
                     self.fallback.provider_name,
+                    yielded_any,
                 )
                 self.last_used_provider = self.fallback.provider_name
                 self.last_used_model = self.fallback.model
+
+                if yielded_any:
+                    yield LLMStreamChunk(delta="", provider_switched=True)
+
                 async for chunk in self.fallback.stream(
                     prompt=prompt,
                     system_instruction=system_instruction,
