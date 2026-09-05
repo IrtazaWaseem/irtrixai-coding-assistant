@@ -12,7 +12,6 @@ from app.services.execution_service import ExecutionService
 from app.tools.base import ToolResult
 from app.tools.schemas import RunCommandOutput
 from app.tools.validators import (
-    validate_command,
     validate_safe_path,
     validate_workspace_dir,
 )
@@ -39,14 +38,12 @@ def run_command(
                 f"Relative path '{relative_directory}' is not a directory."
             )
 
-        validated_argv = validate_command(command)
-
         if effective_timeout < 1:
             raise ToolExecutionException("timeout_seconds must be at least 1.")
 
         service = ExecutionService()
         result_dict = service.execute_in_sandbox(
-            validated_argv=validated_argv,
+            command=command,
             workspace_path=base_dir,
             timeout_seconds=effective_timeout,
             image=image,

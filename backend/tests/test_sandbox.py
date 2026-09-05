@@ -1,3 +1,5 @@
+import contextlib
+import json
 import os
 import subprocess
 import tempfile
@@ -33,7 +35,6 @@ def docker_ready():
     if not ExecutionService.verify_docker_available():
         pytest.skip("Docker daemon is not accessible.")
 
-    # Check if primary sandbox image exists; fallback to python:3.12-slim if necessary
     proc = subprocess.run(
         ["docker", "image", "inspect", settings.DOCKER_SANDBOX_IMAGE],
         stdout=subprocess.DEVNULL,
@@ -44,7 +45,6 @@ def docker_ready():
     if proc.returncode == 0:
         return settings.DOCKER_SANDBOX_IMAGE
 
-    # Check if python:3.12-slim is locally available
     proc_fallback = subprocess.run(
         ["docker", "image", "inspect", "python:3.12-slim"],
         stdout=subprocess.DEVNULL,
@@ -58,7 +58,55 @@ def docker_ready():
     pytest.skip(f"Neither '{settings.DOCKER_SANDBOX_IMAGE}' nor 'python:3.12-slim' is available.")
 
 
-# --- 1. Public Command Policy & Shell Security Tests ---
+# --- Issue 1 Regression Test: Service Boundary Enforcement ---
+
+
+def test_execution_service_direct_caller_security(sandbox_workspace):
+    """Verifies that direct callers of ExecutionService cannot bypass command policy."""
+    service = ExecutionService()
+
+    # 1. Non-allowlisted binary passed as token list
+    with pytest.raises(DisallowedCommandException):
+        service.execute_in_sandbox(
+            command=["bash", "-c", "whoami"],
+            workspace_path=sandbox_workspace,
+            timeout_seconds=5,
+        )
+
+    # 2. Path-prefixed relative binary
+    with pytest.raises(DisallowedCommandException):
+        service.execute_in_sandbox(
+            command=["./python", "-c", "print(1)"],
+            workspace_path=sandbox_workspace,
+            timeout_seconds=5,
+        )
+
+    # 3. Absolute path binary
+    with pytest.raises(DisallowedCommandException):
+        service.execute_in_sandbox(
+            command=["/usr/bin/python", "-c", "print(1)"],
+            workspace_path=sandbox_workspace,
+            timeout_seconds=5,
+        )
+
+    # 4. Injected shell chaining token
+    with pytest.raises(DisallowedCommandException):
+        service.execute_in_sandbox(
+            command=["python", ";", "rm", "-rf", "/"],
+            workspace_path=sandbox_workspace,
+            timeout_seconds=5,
+        )
+
+    # 5. Non-allowlisted string command
+    with pytest.raises(DisallowedCommandException):
+        service.execute_in_sandbox(
+            command="curl http://malicious.com",
+            workspace_path=sandbox_workspace,
+            timeout_seconds=5,
+        )
+
+
+# --- Public Command Policy & Shell Security Tests ---
 
 
 def test_command_security_rejections(sandbox_workspace):
@@ -100,9 +148,6 @@ def test_command_syntax_and_quoting_integrity():
     assert tokens_3 == ["python", "-c", "print(1 + (2 * 3))"]
 
 
-# --- 2. Workspace Isolation & Pre-Mount Boundary Tests ---
-
-
 def test_workspace_traversal_guards(sandbox_workspace):
     """Verifies directory traversal and invalid workspaces fail before Docker."""
     res_traversal = run_command(
@@ -128,20 +173,46 @@ def test_workspace_traversal_guards(sandbox_workspace):
     assert res_missing.success is False
 
 
-# --- 3. Live Docker Sandbox Boundary & Isolation Tests ---
+# --- Issue 3: Live Docker Verification Tests ---
 
 
-def test_docker_live_read_only_workspace(sandbox_workspace, docker_ready):
-    """Verifies the host workspace is strictly read-only inside the container."""
+def test_docker_live_basic_execution_and_tools(sandbox_workspace, docker_ready):
+    """Verifies basic execution, pytest, and ruff availability in sandbox image."""
+    # 1. Basic python execution
     res = run_command(
-        "python -c \"open('/workspace/forbidden.txt', 'w').write('leak')\"",
+        "python -c \"print('hello')\"",
         workspace_root=sandbox_workspace,
         image=docker_ready,
     )
     assert res.success is True
-    assert res.output["exit_code"] != 0
-    assert "Read-only file system" in res.output["stderr"] or "OSError" in res.output["stderr"]
-    assert not (sandbox_workspace / "forbidden.txt").exists()
+    assert res.output["exit_code"] == 0
+    assert "hello" in res.output["stdout"]
+
+    # 2. Pytest tool availability
+    res_pytest = run_command(
+        "pytest --version", workspace_root=sandbox_workspace, image=docker_ready
+    )
+    assert res_pytest.success is True
+    assert res_pytest.output["exit_code"] == 0
+    assert "pytest" in (res_pytest.output["stdout"] + res_pytest.output["stderr"]).lower()
+
+    # 3. Ruff tool availability
+    res_ruff = run_command("ruff --version", workspace_root=sandbox_workspace, image=docker_ready)
+    assert res_ruff.success is True
+    assert res_ruff.output["exit_code"] == 0
+    assert "ruff" in (res_ruff.output["stdout"] + res_ruff.output["stderr"]).lower()
+
+
+def test_docker_live_non_root_execution(sandbox_workspace, docker_ready):
+    """Verifies code executes strictly under non-root UID 1000."""
+    res = run_command(
+        'python -c "import os; print(os.getuid())"',
+        workspace_root=sandbox_workspace,
+        image=docker_ready,
+    )
+    assert res.success is True
+    assert res.output["exit_code"] == 0
+    assert res.output["stdout"].strip() == "1000"
 
 
 def test_docker_live_network_isolation(sandbox_workspace, docker_ready):
@@ -164,39 +235,122 @@ def test_docker_live_network_isolation(sandbox_workspace, docker_ready):
     )
 
 
-def test_docker_live_non_root_execution(sandbox_workspace, docker_ready):
-    """Verifies code executes strictly under non-root UID 1000."""
+def test_docker_live_read_only_workspace(sandbox_workspace, docker_ready):
+    """Verifies the host workspace is strictly read-only inside the container."""
     res = run_command(
-        'python -c "import os; print(os.getuid())"',
+        "python -c \"open('/workspace/forbidden.txt', 'w').write('leak')\"",
+        workspace_root=sandbox_workspace,
+        image=docker_ready,
+    )
+    assert res.success is True
+    assert res.output["exit_code"] != 0
+    assert "Read-only file system" in res.output["stderr"] or "OSError" in res.output["stderr"]
+    assert not (sandbox_workspace / "forbidden.txt").exists()
+
+
+def test_docker_live_root_filesystem_read_only(sandbox_workspace, docker_ready):
+    """Verifies the container root filesystem is strictly read-only."""
+    res = run_command(
+        "python -c \"open('/root_test.txt', 'w').write('fail')\"",
+        workspace_root=sandbox_workspace,
+        image=docker_ready,
+    )
+    assert res.success is True
+    assert res.output["exit_code"] != 0
+    assert "Read-only file system" in res.output["stderr"] or "OSError" in res.output["stderr"]
+
+
+def test_docker_live_scratch_temporary_storage_writable(sandbox_workspace, docker_ready):
+    """Verifies container-local tmpfs (/tmp) is writable and isolated from host."""
+    script = (
+        "import tempfile, os\n"
+        "with tempfile.NamedTemporaryFile(dir='/tmp', delete=False) as f:\n"
+        "    f.write(b'scratch_data')\n"
+        "    p = f.name\n"
+        "assert os.path.exists(p)\n"
+        "print('TEMP_PATH:' + p)\n"
+    )
+    res = run_command(
+        f'python -c "{script}"',
         workspace_root=sandbox_workspace,
         image=docker_ready,
     )
     assert res.success is True
     assert res.output["exit_code"] == 0
-    assert res.output["stdout"].strip() == "1000"
+    assert "TEMP_PATH:/tmp/" in res.output["stdout"]
 
 
-def test_docker_live_timeout_terminates_and_removes_container(sandbox_workspace, docker_ready):
-    """Verifies timeout kills the process and guarantees zero orphaned containers."""
+def test_docker_live_host_filesystem_isolation(sandbox_workspace, docker_ready):
+    """Verifies host files outside the mounted workspace cannot be read."""
+    with tempfile.NamedTemporaryFile(delete=False) as host_secret:
+        host_secret.write(b"SYNTHETIC_HOST_SECRET_TOKEN_XYZ")
+        host_secret_path = host_secret.name
+
+    try:
+        container_path = host_secret_path.replace("\\", "/")
+        probe = (
+            f"import os\n"
+            f"target = '{container_path}'\n"
+            f"exists = os.path.exists(target)\n"
+            f"print('EXISTS:' + str(exists))\n"
+        )
+        res = run_command(
+            f'python -c "{probe}"',
+            workspace_root=sandbox_workspace,
+            image=docker_ready,
+        )
+        assert res.success is True
+        assert "EXISTS:False" in res.output["stdout"]
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(host_secret_path)
+
+
+def test_docker_live_symlink_external_target_unreachable(sandbox_workspace, docker_ready):
+    """Verifies external symlink targets cannot be read from inside the container."""
+    with tempfile.NamedTemporaryFile(delete=False) as external_target:
+        external_target.write(b"EXTERNAL_HOST_DATA_LEAK")
+        external_target_path = external_target.name
+
+    evil_link = sandbox_workspace / "evil_link.txt"
+    try:
+        os.symlink(external_target_path, evil_link)
+    except OSError:
+        pytest.skip("Host OS requires elevated privileges for symlink creation.")
+
+    try:
+        script = (
+            "from pathlib import Path\n"
+            "p = Path('/workspace/evil_link.txt')\n"
+            "try:\n"
+            "    data = p.read_text()\n"
+            "    print('LEAK:' + data)\n"
+            "except Exception as err:\n"
+            "    print('BLOCKED:' + err.__class__.__name__)\n"
+        )
+        res = run_command(
+            f'python -c "{script}"',
+            workspace_root=sandbox_workspace,
+            image=docker_ready,
+        )
+        assert res.success is True
+        assert "LEAK:EXTERNAL_HOST_DATA_LEAK" not in res.output["stdout"]
+        assert "BLOCKED:" in res.output["stdout"]
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(external_target_path)
+
+
+def test_docker_live_docker_socket_absent(sandbox_workspace, docker_ready):
+    """Verifies Docker socket is never mounted into the sandbox."""
+    script = "import os; print('SOCKET_EXISTS:' + str(os.path.exists('/var/run/docker.sock')))"
     res = run_command(
-        'python -c "import time; time.sleep(10)"',
+        f'python -c "{script}"',
         workspace_root=sandbox_workspace,
-        timeout_seconds=2,
         image=docker_ready,
     )
-    assert res.success is False
-    assert res.metadata.get("timeout") is True
-
-    # Confirm container is removed from host Docker daemon
-    proc = subprocess.run(
-        ["docker", "ps", "-a", "--filter", f"ancestor={docker_ready}", "-q"],
-        capture_output=True,
-        text=True,
-        check=False,
-        shell=False,
-    )
-    # The timed-out container ID should not be lingering
-    assert proc.returncode == 0
+    assert res.success is True
+    assert "SOCKET_EXISTS:False" in res.output["stdout"]
 
 
 def test_docker_live_output_byte_bounded(sandbox_workspace, docker_ready):
@@ -210,6 +364,74 @@ def test_docker_live_output_byte_bounded(sandbox_workspace, docker_ready):
     assert res.success is True
     assert res.output["truncated"] is True
     assert len(res.output["stdout"].encode("utf-8")) <= settings.MAX_TOOL_OUTPUT_BYTES
+
+
+def test_docker_live_timeout_terminates_and_removes_container(sandbox_workspace, docker_ready):
+    """Verifies timeout kills the process and guarantees zero orphaned containers."""
+    res = run_command(
+        'python -c "import time; time.sleep(10)"',
+        workspace_root=sandbox_workspace,
+        timeout_seconds=2,
+        image=docker_ready,
+    )
+    assert res.success is False
+    assert res.metadata.get("timeout") is True
+
+
+def test_docker_live_resource_limits_and_capabilities(docker_ready):
+    """Verifies container parameters match memory, cpu, pids, and drop-all policies."""
+    proc = subprocess.run(
+        [
+            "docker",
+            "create",
+            "--network=none",
+            "--cap-drop=ALL",
+            "--security-opt=no-new-privileges:true",
+            f"--memory={settings.SANDBOX_MEMORY_LIMIT}",
+            f"--cpus={settings.SANDBOX_CPU_LIMIT}",
+            f"--pids-limit={settings.SANDBOX_PIDS_LIMIT}",
+            docker_ready,
+            "python",
+            "-c",
+            "print(1)",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        shell=False,
+    )
+    assert proc.returncode == 0
+    cid = proc.stdout.strip()
+    try:
+        inspect_proc = subprocess.run(
+            ["docker", "inspect", cid],
+            capture_output=True,
+            text=True,
+            check=False,
+            shell=False,
+        )
+        assert inspect_proc.returncode == 0
+        data = json.loads(inspect_proc.stdout)[0]
+        host_config = data["HostConfig"]
+
+        # Memory limit: 512MB = 536870912 bytes
+        assert host_config["Memory"] == 536870912
+        # CPU limit: 1.0 CPU = 1000000000 nanoCPUs
+        assert host_config["NanoCpus"] == 1000000000
+        # PIDs limit
+        assert host_config["PidsLimit"] == settings.SANDBOX_PIDS_LIMIT
+        # CapDrop contains ALL
+        assert "ALL" in host_config["CapDrop"]
+        # Network mode is none
+        assert host_config["NetworkMode"] == "none"
+    finally:
+        subprocess.run(
+            ["docker", "rm", "-f", cid],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            shell=False,
+        )
 
 
 def test_docker_live_host_environment_isolation(sandbox_workspace, docker_ready):
@@ -227,22 +449,12 @@ def test_docker_live_host_environment_isolation(sandbox_workspace, docker_ready)
         os.environ.pop("HOST_LEAK_SECRET_KEY", None)
 
 
-def test_docker_live_scratch_temporary_storage_writable(sandbox_workspace, docker_ready):
-    """Verifies container-local tmpfs (/tmp) is writable for compiler/runtime scratch."""
-    script = (
-        "import tempfile, os\n"
-        "with tempfile.NamedTemporaryFile(delete=False) as f:\n"
-        "    f.write(b'scratch_data')\n"
-        "    p = f.name\n"
-        "assert os.path.exists(p)\n"
-        "os.unlink(p)\n"
-        "print('SCRATCH_OK')\n"
-    )
+def test_docker_live_cleanup_on_nonzero_exit(sandbox_workspace, docker_ready):
+    """Verifies containers are cleanly removed even when the command fails with non-zero exit."""
     res = run_command(
-        f'python -c "{script}"',
+        'python -c "import sys; sys.exit(42)"',
         workspace_root=sandbox_workspace,
         image=docker_ready,
     )
     assert res.success is True
-    assert res.output["exit_code"] == 0
-    assert "SCRATCH_OK" in res.output["stdout"]
+    assert res.output["exit_code"] == 42

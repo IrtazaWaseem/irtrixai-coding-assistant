@@ -9,7 +9,7 @@ from app.core.exceptions import (
     ContainerExecutionException,
     ContainerTimeoutException,
 )
-from app.tools.validators import truncate_output
+from app.core.security import truncate_output, validate_command
 
 
 class ExecutionService:
@@ -137,12 +137,7 @@ class ExecutionService:
         container_id: str,
         max_bytes: int = settings.MAX_TOOL_OUTPUT_BYTES,
     ) -> tuple[str, str, bool]:
-        """Streams container logs up to buffer threshold directly from Docker.
-
-        Reads stdout and stderr concurrently in bounded chunks. Terminating log
-        collection if output exceeds buffer threshold prevents unbounded Python
-        memory retention.
-        """
+        """Streams container logs up to buffer threshold directly from Docker."""
         buffer_cap = max_bytes + 4096
         cmd = ["docker", "logs", container_id]
 
@@ -234,12 +229,15 @@ class ExecutionService:
 
     def execute_in_sandbox(
         self,
-        validated_argv: list[str],
+        command: str | list[str],
         workspace_path: Path,
         timeout_seconds: int,
         image: str | None = None,
     ) -> dict:
         """Coordinates full container lifecycle for command execution."""
+        # Enforce validation boundary internally for all callers
+        validated_argv = validate_command(command)
+
         container_id: str | None = None
         start_time = time.perf_counter()
 

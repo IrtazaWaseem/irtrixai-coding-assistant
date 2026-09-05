@@ -5,7 +5,6 @@ from app.core.exceptions import (
     DisallowedCommandException,
     ProtectedFileAccessViolationException,
 )
-from app.services.execution_service import ExecutionService
 from app.tools.base import ToolResult
 from app.tools.execution_tools import run_command
 from app.tools.file_tools import (
@@ -52,7 +51,6 @@ __all__ = [
     "ContainerExecutionException",
     "ContainerTimeoutException",
     "DisallowedCommandException",
-    "ExecutionService",
     "FileEntry",
     "GitStagedItem",
     "GitStatusOutput",

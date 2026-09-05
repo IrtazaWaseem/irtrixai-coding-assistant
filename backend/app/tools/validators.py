@@ -1,18 +1,20 @@
 import contextvars
-import shlex
 from pathlib import Path
 
 from app.core.config import settings
-from app.core.constants import ALLOWLISTED_EXECUTABLES, FORBIDDEN_COMMAND_TOKENS, is_protected_file
+from app.core.constants import is_protected_file
 from app.core.exceptions import (
     AppException,
-    DisallowedCommandException,
     EntityNotFoundException,
     FileSizeLimitExceededException,
     ProtectedFileAccessViolationException,
     ToolExecutionException,
 )
-from app.core.security import resolve_safe_path
+from app.core.security import (
+    resolve_safe_path,
+    truncate_output,
+    validate_command,
+)
 
 _current_workspace_root: contextvars.ContextVar[Path | None] = contextvars.ContextVar(
     "current_workspace_root", default=None
@@ -122,22 +124,6 @@ def validate_content_size(
     return byte_length
 
 
-def truncate_output(
-    content: str,
-    max_bytes: int | None = None,
-) -> tuple[str, bool]:
-    """Truncates string content cleanly if UTF-8 representation exceeds max_bytes."""
-    if max_bytes is None:
-        max_bytes = settings.MAX_TOOL_OUTPUT_BYTES
-
-    encoded = content.encode("utf-8")
-    if len(encoded) <= max_bytes:
-        return content, False
-
-    truncated_str = encoded[:max_bytes].decode("utf-8", errors="ignore")
-    return truncated_str, True
-
-
 def validate_allowed_operation(operation: str, allowed: set[str] | list[str]) -> str:
     """Enforces allowlisted operations."""
     allowed_set = set(allowed)
@@ -149,67 +135,15 @@ def validate_allowed_operation(operation: str, allowed: set[str] | list[str]) ->
     return operation
 
 
-def _has_unquoted_shell_operators(command_str: str) -> tuple[bool, str]:
-    """Scans command string for shell chaining/redirection operators outside quotes."""
-    in_single = False
-    in_double = False
-    escape = False
-
-    for char in command_str:
-        if escape:
-            escape = False
-            continue
-        if char == "\\":
-            escape = True
-            continue
-        if char == "'" and not in_double:
-            in_single = not in_single
-            continue
-        if char == '"' and not in_single:
-            in_double = not in_double
-            continue
-        if not in_single and not in_double and char in FORBIDDEN_COMMAND_TOKENS:
-            return True, char
-
-    return False, ""
-
-
-def validate_command(command_str: str) -> list[str]:
-    """Validates and parses a command string into deterministic argv tokens.
-
-    Enforces:
-    1. Command string is non-empty.
-    2. No unquoted shell chaining or redirection operators (; & | < > ` $).
-    3. argv[0] must be a bare name without path separators (/ or \\).
-    4. argv[0] must exactly match an entry in ALLOWLISTED_EXECUTABLES.
-    """
-    if not command_str or not command_str.strip():
-        raise DisallowedCommandException("Command string cannot be empty.")
-
-    has_op, op_char = _has_unquoted_shell_operators(command_str)
-    if has_op:
-        raise DisallowedCommandException(
-            f"Shell control operator '{op_char}' is forbidden outside quoted arguments."
-        )
-
-    try:
-        tokens = shlex.split(command_str.strip(), posix=True)
-    except ValueError as err:
-        raise DisallowedCommandException(f"Failed to parse command syntax: {err}") from err
-
-    if not tokens:
-        raise DisallowedCommandException("Command string contained no executable tokens.")
-
-    executable = tokens[0]
-
-    if "/" in executable or "\\" in executable:
-        raise DisallowedCommandException(
-            f"Executable path '{executable}' is forbidden. Only bare allowlisted names are accepted."
-        )
-
-    if executable not in ALLOWLISTED_EXECUTABLES:
-        raise DisallowedCommandException(
-            f"Executable '{executable}' is not allowlisted. Supported: {sorted(ALLOWLISTED_EXECUTABLES)}"
-        )
-
-    return tokens
+__all__ = [
+    "get_current_workspace",
+    "set_current_workspace",
+    "truncate_output",
+    "validate_allowed_operation",
+    "validate_command",
+    "validate_content_size",
+    "validate_file_size",
+    "validate_not_protected",
+    "validate_safe_path",
+    "validate_workspace_dir",
+]
