@@ -123,7 +123,9 @@ class OllamaProvider(LLMProvider):
                 resp.raise_for_status()
                 data = resp.json()
             else:
-                async with httpx.AsyncClient(timeout=self.config.timeout_seconds) as client:
+                async with httpx.AsyncClient(
+                    timeout=self.config.timeout_seconds
+                ) as client:
                     resp = await client.post(url, json=payload)
                     resp.raise_for_status()
                     data = resp.json()
@@ -179,7 +181,9 @@ class OllamaProvider(LLMProvider):
                 resp.raise_for_status()
                 data = resp.json()
             else:
-                async with httpx.AsyncClient(timeout=self.config.timeout_seconds) as client:
+                async with httpx.AsyncClient(
+                    timeout=self.config.timeout_seconds
+                ) as client:
                     resp = await client.post(url, json=payload)
                     resp.raise_for_status()
                     data = resp.json()
@@ -229,4 +233,6 @@ class OllamaProvider(LLMProvider):
                     yield LLMStreamChunk(delta=delta, finish_reason=reason)
         except Exception as err:
             self._handle_http_error(err)
-            raise LLMProviderException(f"Unexpected Ollama streaming error: {err}") from err
+            raise LLMProviderException(
+                f"Unexpected Ollama streaming error: {err}"
+            ) from err

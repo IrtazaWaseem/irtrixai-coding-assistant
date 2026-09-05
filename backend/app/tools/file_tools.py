@@ -66,7 +66,9 @@ def list_files(
         target_dir = validate_safe_path(base_dir, relative_directory, must_exist=True)
 
         if not target_dir.is_dir():
-            raise ToolExecutionException(f"Path '{relative_directory}' is not a directory.")
+            raise ToolExecutionException(
+                f"Path '{relative_directory}' is not a directory."
+            )
 
         effective_max_depth = max_depth if recursive else 1
         entries: list[FileEntry] = []
@@ -100,7 +102,9 @@ def list_files(
                     continue
 
                 try:
-                    safe_child = validate_safe_path(base_dir, item.path, must_exist=False)
+                    safe_child = validate_safe_path(
+                        base_dir, item.path, must_exist=False
+                    )
                     if is_protected_file(safe_child):
                         continue
                 except SecurityViolationException:
@@ -110,14 +114,18 @@ def list_files(
                 rel_path = str(safe_child.relative_to(base_dir)).replace("\\", "/")
 
                 if item.is_dir(follow_symlinks=False):
-                    entries.append(FileEntry(name=item.name, path=rel_path, type="directory"))
+                    entries.append(
+                        FileEntry(name=item.name, path=rel_path, type="directory")
+                    )
                     if recursive and depth < effective_max_depth:
                         _walk(safe_child, depth + 1)
                 elif item.is_file(follow_symlinks=False):
                     size = None
                     with contextlib.suppress(OSError):
                         size = item.stat().st_size
-                    entries.append(FileEntry(name=item.name, path=rel_path, type="file", size=size))
+                    entries.append(
+                        FileEntry(name=item.name, path=rel_path, type="file", size=size)
+                    )
 
         _walk(target_dir, depth=1)
 
@@ -152,12 +160,16 @@ def read_file(
         with safe_file.open("rb") as f:
             header = f.read(8192)
             if b"\x00" in header:
-                raise ToolExecutionException(f"Cannot read binary file '{path}' as text.")
+                raise ToolExecutionException(
+                    f"Cannot read binary file '{path}' as text."
+                )
 
         try:
             raw_text = safe_file.read_text(encoding="utf-8")
         except UnicodeDecodeError as err:
-            raise ToolExecutionException(f"File '{path}' is not valid UTF-8 text: {err}") from err
+            raise ToolExecutionException(
+                f"File '{path}' is not valid UTF-8 text: {err}"
+            ) from err
 
         all_lines = raw_text.splitlines()
         total_lines = len(all_lines)
@@ -224,7 +236,9 @@ def search_code(
         target_dir = validate_safe_path(base_dir, relative_path, must_exist=True)
 
         if not target_dir.is_dir():
-            raise ToolExecutionException(f"Search path '{relative_path}' is not a directory.")
+            raise ToolExecutionException(
+                f"Search path '{relative_path}' is not a directory."
+            )
 
         max_matches = settings.MAX_SEARCH_RESULTS
         max_file_size = settings.MAX_SEARCH_FILE_SIZE
@@ -251,8 +265,14 @@ def search_code(
                 raw_file_path = Path(root) / file
 
                 try:
-                    safe_file = validate_safe_path(base_dir, raw_file_path, must_exist=True)
-                except (SecurityViolationException, EntityNotFoundException, AppException):
+                    safe_file = validate_safe_path(
+                        base_dir, raw_file_path, must_exist=True
+                    )
+                except (
+                    SecurityViolationException,
+                    EntityNotFoundException,
+                    AppException,
+                ):
                     continue
 
                 if is_protected_file(safe_file):
@@ -386,7 +406,9 @@ def apply_patch(
             )
             matches = list(block_pattern.finditer(patch_content))
             if not matches:
-                raise ToolExecutionException("Malformed search-and-replace patch structure.")
+                raise ToolExecutionException(
+                    "Malformed search-and-replace patch structure."
+                )
 
             current_text = original_content
             for idx, match in enumerate(matches, start=1):
@@ -456,7 +478,9 @@ def apply_patch(
                 _commit_hunk(hunk_lines)
 
             res_lines.extend(orig_lines[line_cursor:])
-            new_content = newline.join(res_lines) + (newline if ends_with_newline else "")
+            new_content = newline.join(res_lines) + (
+                newline if ends_with_newline else ""
+            )
         else:
             raise ToolExecutionException(
                 "Unrecognized patch format. Provide unified diff (@@) or search-replace blocks."

@@ -90,7 +90,9 @@ def git_status(
             workspace_root=base_dir,
         )
         if code != 0:
-            raise ToolExecutionException(f"git status failed: {stderr.strip() or stdout.strip()}")
+            raise ToolExecutionException(
+                f"git status failed: {stderr.strip() or stdout.strip()}"
+            )
 
         lines = stdout.splitlines()
         branch = "HEAD"
@@ -180,7 +182,9 @@ def git_diff(
 
         code, stdout, stderr = _execute_git_cmd(cmd, workspace_root=base_dir)
         if code != 0:
-            raise ToolExecutionException(f"git diff failed: {stderr.strip() or stdout.strip()}")
+            raise ToolExecutionException(
+                f"git diff failed: {stderr.strip() or stdout.strip()}"
+            )
 
         content, truncated = truncate_output(stdout)
         metadata = {
@@ -209,7 +213,9 @@ def get_diff(
 
         code, stdout, stderr = _execute_git_cmd(cmd, workspace_root=base_dir)
         if code != 0:
-            raise ToolExecutionException(f"git diff failed: {stderr.strip() or stdout.strip()}")
+            raise ToolExecutionException(
+                f"git diff failed: {stderr.strip() or stdout.strip()}"
+            )
 
         content, truncated = truncate_output(stdout)
         metadata = {

@@ -140,7 +140,9 @@ class StreamingMockProvider(LLMProvider):
     async def generate(self, prompt: str, **kwargs) -> LLMResponse:
         raise NotImplementedError
 
-    async def generate_structured[T: BaseModel](self, prompt: str, schema: type[T], **kwargs) -> T:
+    async def generate_structured[T: BaseModel](
+        self, prompt: str, schema: type[T], **kwargs
+    ) -> T:
         raise NotImplementedError
 
     async def stream(
@@ -278,7 +280,9 @@ def test_provider_independent_errors_raised():
 
 
 def test_fallback_configuration_can_be_absent():
-    primary = MockConfigurableProvider(LLMConfig(provider="ollama", model="qwen-gpu-tuned"))
+    primary = MockConfigurableProvider(
+        LLMConfig(provider="ollama", model="qwen-gpu-tuned")
+    )
     gateway = LLMGateway(primary_provider=primary, fallback_provider=None)
     assert gateway.primary is primary
     assert gateway.fallback is None
@@ -291,7 +295,9 @@ async def test_gateway_generation_and_fallback_dispatch():
         LLMConfig(provider="gemini", model="gemini-2.5-flash"),
         fail_with=transient_error,
     )
-    fallback = MockConfigurableProvider(LLMConfig(provider="ollama", model="deepseek-r1:8b"))
+    fallback = MockConfigurableProvider(
+        LLMConfig(provider="ollama", model="deepseek-r1:8b")
+    )
 
     gateway = LLMGateway(primary_provider=primary, fallback_provider=fallback)
 

@@ -103,7 +103,10 @@ async def test_ollama_streaming():
     chunks = [
         json.dumps({"message": {"content": "def "}, "done": False}) + "\n",
         json.dumps({"message": {"content": "foo():"}, "done": False}) + "\n",
-        json.dumps({"message": {"content": " pass"}, "done": True, "done_reason": "stop"}) + "\n",
+        json.dumps(
+            {"message": {"content": " pass"}, "done": True, "done_reason": "stop"}
+        )
+        + "\n",
     ]
 
     def handle_request(_: httpx.Request) -> httpx.Response:
@@ -134,7 +137,9 @@ async def test_ollama_error_mapping():
     def timeout_handler(_: httpx.Request) -> httpx.Response:
         raise httpx.ReadTimeout("Timeout")
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(timeout_handler)) as client:
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(timeout_handler)
+    ) as client:
         provider = OllamaProvider(config, client=client)
         with pytest.raises(LLMTimeoutException):
             await provider.generate("hi")
@@ -147,7 +152,9 @@ async def test_ollama_error_mapping():
 async def test_groq_arbitrary_model_and_auth():
     """Verifies Groq adapter accepts arbitrary model strings and enforces API key presence."""
     with pytest.raises(LLMAuthenticationException):
-        GroqProvider(LLMConfig(provider="groq", model="llama-3.3-70b-versatile", api_key=""))
+        GroqProvider(
+            LLMConfig(provider="groq", model="llama-3.3-70b-versatile", api_key="")
+        )
 
     config = LLMConfig(
         provider="groq",
@@ -163,7 +170,10 @@ async def test_groq_arbitrary_model_and_auth():
             status_code=200,
             json={
                 "choices": [
-                    {"message": {"content": "Fast Groq response"}, "finish_reason": "stop"}
+                    {
+                        "message": {"content": "Fast Groq response"},
+                        "finish_reason": "stop",
+                    }
                 ],
                 "usage": {"total_tokens": 15},
             },
@@ -187,19 +197,25 @@ async def test_groq_error_mapping():
     """Verifies Groq 401, 429, and 404 status codes map to normalized exceptions."""
     config = LLMConfig(provider="groq", model="test-model", api_key="gsk_key")
 
-    transport_401 = httpx.MockTransport(lambda _: httpx.Response(401, text="Invalid API Key"))
+    transport_401 = httpx.MockTransport(
+        lambda _: httpx.Response(401, text="Invalid API Key")
+    )
     async with httpx.AsyncClient(transport=transport_401) as client:
         provider = GroqProvider(config, client=client)
         with pytest.raises(LLMAuthenticationException):
             await provider.generate("hi")
 
-    transport_429 = httpx.MockTransport(lambda _: httpx.Response(429, text="Rate limit exceeded"))
+    transport_429 = httpx.MockTransport(
+        lambda _: httpx.Response(429, text="Rate limit exceeded")
+    )
     async with httpx.AsyncClient(transport=transport_429) as client:
         provider = GroqProvider(config, client=client)
         with pytest.raises(LLMRateLimitException):
             await provider.generate("hi")
 
-    transport_404 = httpx.MockTransport(lambda _: httpx.Response(404, text="Model does not exist"))
+    transport_404 = httpx.MockTransport(
+        lambda _: httpx.Response(404, text="Model does not exist")
+    )
     async with httpx.AsyncClient(transport=transport_404) as client:
         provider = GroqProvider(config, client=client)
         with pytest.raises(LLMInvalidModelException):
@@ -222,7 +238,9 @@ async def test_gemini_arbitrary_model_generate():
     mock_response = MagicMock()
     mock_response.text = "Generated from Gemini Flash"
     mock_response.candidates = [MagicMock(finish_reason="STOP")]
-    mock_response.usage_metadata = MagicMock(prompt_token_count=10, candidates_token_count=5)
+    mock_response.usage_metadata = MagicMock(
+        prompt_token_count=10, candidates_token_count=5
+    )
 
     mock_client = MagicMock()
     mock_client.aio.models.generate_content = AsyncMock(return_value=mock_response)
@@ -293,7 +311,9 @@ async def test_gemini_error_mapping():
 @pytest.mark.asyncio
 async def test_gateway_transient_fallback_success():
     """Verifies primary transient failure falls back to secondary and records actual model."""
-    primary_config = LLMConfig(provider="groq", model="llama-3.3-70b-versatile", api_key="gsk_key")
+    primary_config = LLMConfig(
+        provider="groq", model="llama-3.3-70b-versatile", api_key="gsk_key"
+    )
     fallback_config = LLMConfig(provider="ollama", model="qwen-gpu-tuned")
 
     def groq_fail(_: httpx.Request) -> httpx.Response:
@@ -326,7 +346,9 @@ async def test_gateway_transient_fallback_success():
 @pytest.mark.asyncio
 async def test_gateway_non_transient_does_not_fallback():
     """Verifies non-transient error (e.g. 401 Auth) raises immediately without fallback."""
-    primary_config = LLMConfig(provider="groq", model="llama-3.3-70b-versatile", api_key="gsk_bad")
+    primary_config = LLMConfig(
+        provider="groq", model="llama-3.3-70b-versatile", api_key="gsk_bad"
+    )
 
     def groq_401(_: httpx.Request) -> httpx.Response:
         return httpx.Response(401, text="Unauthorized key")

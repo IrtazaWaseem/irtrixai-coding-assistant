@@ -76,7 +76,9 @@ def test_read_file_normal_empty_and_ranges(workspace_env):
     assert empty_res.output["content"] == ""
     assert empty_res.output["total_lines"] == 0
 
-    range_res = read_file("src/main.py", start_line=2, end_line=2, workspace_root=workspace_env)
+    range_res = read_file(
+        "src/main.py", start_line=2, end_line=2, workspace_root=workspace_env
+    )
     assert range_res.success is True
     assert range_res.output["content"] == "    return 'production ready'"
     assert range_res.output["start_line"] == 2
@@ -102,7 +104,9 @@ def test_read_file_guards_and_exceptions(workspace_env):
     with pytest.raises(SecurityViolationException):
         read_file("../../etc/passwd", workspace_root=workspace_env, raise_on_error=True)
 
-    invalid_range = read_file("src/main.py", start_line=5, end_line=2, workspace_root=workspace_env)
+    invalid_range = read_file(
+        "src/main.py", start_line=5, end_line=2, workspace_root=workspace_env
+    )
     assert invalid_range.success is False
     with pytest.raises(ToolExecutionException):
         read_file(
@@ -116,7 +120,9 @@ def test_read_file_guards_and_exceptions(workspace_env):
 
 def test_read_file_oversized_guard(workspace_env):
     oversized_file = workspace_env / "oversized.txt"
-    oversized_file.write_text("B" * (settings.MAX_READ_FILE_BYTES + 1024), encoding="utf-8")
+    oversized_file.write_text(
+        "B" * (settings.MAX_READ_FILE_BYTES + 1024), encoding="utf-8"
+    )
 
     res = read_file("oversized.txt", workspace_root=workspace_env)
     assert res.success is False
@@ -152,7 +158,9 @@ def test_write_file_atomic_and_traversal(workspace_env):
     overwrite_res = write_file(new_path, "secret = 456\n", workspace_root=workspace_env)
     assert overwrite_res.success is True
     assert overwrite_res.output["is_new_file"] is False
-    assert (workspace_env / "src" / "sub" / "nested" / "file.py").read_text() == "secret = 456\n"
+    assert (
+        workspace_env / "src" / "sub" / "nested" / "file.py"
+    ).read_text() == "secret = 456\n"
 
     bad_write = write_file("../escaped.txt", "payload", workspace_root=workspace_env)
     assert bad_write.success is False
@@ -220,4 +228,6 @@ def test_apply_patch_search_replace_and_oversized(workspace_env):
     oversized = apply_patch(target, huge_patch, workspace_root=workspace_env)
     assert oversized.success is False
     with pytest.raises(FileSizeLimitExceededException):
-        apply_patch(target, huge_patch, workspace_root=workspace_env, raise_on_error=True)
+        apply_patch(
+            target, huge_patch, workspace_root=workspace_env, raise_on_error=True
+        )

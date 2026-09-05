@@ -71,19 +71,27 @@ def test_git_status_modified_untracked_deleted_staged(temp_git_workspace):
     (temp_git_workspace / "new.txt").write_text("new content", encoding="utf-8")
 
     # Modified file
-    (temp_git_workspace / "hello.txt").write_text("hello\nmodified world\n", encoding="utf-8")
+    (temp_git_workspace / "hello.txt").write_text(
+        "hello\nmodified world\n", encoding="utf-8"
+    )
 
     # Deleted file (create, commit, then delete on disk)
     (temp_git_workspace / "to_delete.txt").write_text("delete me", encoding="utf-8")
-    subprocess.run(["git", "add", "to_delete.txt"], cwd=str(temp_git_workspace), check=True)
     subprocess.run(
-        ["git", "commit", "-m", "add delete target"], cwd=str(temp_git_workspace), check=True
+        ["git", "add", "to_delete.txt"], cwd=str(temp_git_workspace), check=True
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "add delete target"],
+        cwd=str(temp_git_workspace),
+        check=True,
     )
     os.unlink(temp_git_workspace / "to_delete.txt")
 
     # Staged file
     (temp_git_workspace / "staged.txt").write_text("staged file", encoding="utf-8")
-    subprocess.run(["git", "add", "staged.txt"], cwd=str(temp_git_workspace), check=True)
+    subprocess.run(
+        ["git", "add", "staged.txt"], cwd=str(temp_git_workspace), check=True
+    )
 
     res = git_status(workspace_root=temp_git_workspace)
     assert res.success is True
@@ -91,7 +99,9 @@ def test_git_status_modified_untracked_deleted_staged(temp_git_workspace):
     assert "hello.txt" in res.output["modified"]
     assert "new.txt" in res.output["untracked"]
     assert "to_delete.txt" in res.output["deleted"]
-    assert any(s["path"] == "staged.txt" and s["status"] == "A" for s in res.output["staged"])
+    assert any(
+        s["path"] == "staged.txt" and s["status"] == "A" for s in res.output["staged"]
+    )
 
 
 def test_git_status_non_git_directory(non_git_workspace):
@@ -104,11 +114,17 @@ def test_git_status_non_git_directory(non_git_workspace):
 
 
 def test_git_diff_normal_and_file_specific(temp_git_workspace):
-    (temp_git_workspace / "hello.txt").write_text("hello\nmodified world\n", encoding="utf-8")
+    (temp_git_workspace / "hello.txt").write_text(
+        "hello\nmodified world\n", encoding="utf-8"
+    )
     (temp_git_workspace / "other.txt").write_text("other text\n", encoding="utf-8")
     subprocess.run(["git", "add", "other.txt"], cwd=str(temp_git_workspace), check=True)
-    subprocess.run(["git", "commit", "-m", "add other"], cwd=str(temp_git_workspace), check=True)
-    (temp_git_workspace / "other.txt").write_text("other text modified\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "commit", "-m", "add other"], cwd=str(temp_git_workspace), check=True
+    )
+    (temp_git_workspace / "other.txt").write_text(
+        "other text modified\n", encoding="utf-8"
+    )
 
     # Full unstaged diff
     full_diff = git_diff(workspace_root=temp_git_workspace)
@@ -130,7 +146,9 @@ def test_git_diff_nonexistent_and_traversal(temp_git_workspace):
     assert missing.success is False
     with pytest.raises(EntityNotFoundException):
         git_diff(
-            file_path="nonexistent.txt", workspace_root=temp_git_workspace, raise_on_error=True
+            file_path="nonexistent.txt",
+            workspace_root=temp_git_workspace,
+            raise_on_error=True,
         )
 
     # Traversal escape
@@ -138,7 +156,9 @@ def test_git_diff_nonexistent_and_traversal(temp_git_workspace):
     assert bad_path.success is False
     with pytest.raises(SecurityViolationException):
         git_diff(
-            file_path="../../etc/passwd", workspace_root=temp_git_workspace, raise_on_error=True
+            file_path="../../etc/passwd",
+            workspace_root=temp_git_workspace,
+            raise_on_error=True,
         )
 
 
@@ -146,8 +166,12 @@ def test_git_diff_path_beginning_with_dash_and_injection(temp_git_workspace):
     # Legitimate file starting with a dash
     dash_file = temp_git_workspace / "-dashfile.txt"
     dash_file.write_text("dash original\n", encoding="utf-8")
-    subprocess.run(["git", "add", "--", "-dashfile.txt"], cwd=str(temp_git_workspace), check=True)
-    subprocess.run(["git", "commit", "-m", "add dashfile"], cwd=str(temp_git_workspace), check=True)
+    subprocess.run(
+        ["git", "add", "--", "-dashfile.txt"], cwd=str(temp_git_workspace), check=True
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "add dashfile"], cwd=str(temp_git_workspace), check=True
+    )
 
     dash_file.write_text("dash modified\n", encoding="utf-8")
     res = git_diff(file_path="-dashfile.txt", workspace_root=temp_git_workspace)
@@ -157,7 +181,9 @@ def test_git_diff_path_beginning_with_dash_and_injection(temp_git_workspace):
 
     # Argument injection attempts
     leak_target = temp_git_workspace / "leak.txt"
-    inject_res = git_diff(file_path="--output=leak.txt", workspace_root=temp_git_workspace)
+    inject_res = git_diff(
+        file_path="--output=leak.txt", workspace_root=temp_git_workspace
+    )
     assert inject_res.success is False
     assert not leak_target.exists()
 
@@ -184,7 +210,9 @@ def test_get_diff_clean_unstaged_staged_and_oversized(temp_git_workspace):
     assert clean_res.output == ""
 
     # Unstaged diff
-    (temp_git_workspace / "hello.txt").write_text("hello\nworking copy\n", encoding="utf-8")
+    (temp_git_workspace / "hello.txt").write_text(
+        "hello\nworking copy\n", encoding="utf-8"
+    )
     unstaged_res = get_diff(cached=False, workspace_root=temp_git_workspace)
     assert unstaged_res.success is True
     assert "+working copy" in unstaged_res.output

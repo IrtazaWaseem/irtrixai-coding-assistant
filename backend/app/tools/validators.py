@@ -36,7 +36,9 @@ def validate_workspace_dir(workspace_root: str | Path | None = None) -> Path:
     """Verifies that the workspace root exists, is a directory, and resolves safely."""
     if workspace_root is None:
         ctx_root = get_current_workspace()
-        workspace_root = ctx_root if ctx_root is not None else settings.WORKSPACE_BASE_PATH
+        workspace_root = (
+            ctx_root if ctx_root is not None else settings.WORKSPACE_BASE_PATH
+        )
 
     return validate_workspace_path(workspace_root)
 
@@ -103,11 +105,17 @@ def validate_content_size(
     field_name: str = "content",
 ) -> int:
     """Ensures input payload size does not exceed specified limit."""
-    byte_length = len(content.encode("utf-8")) if isinstance(content, str) else len(content)
+    byte_length = (
+        len(content.encode("utf-8")) if isinstance(content, str) else len(content)
+    )
     if byte_length > max_bytes:
         raise FileSizeLimitExceededException(
             f"Payload for '{field_name}' ({byte_length} bytes) exceeds limit of {max_bytes} bytes.",
-            details={"byte_length": byte_length, "max_bytes": max_bytes, "field": field_name},
+            details={
+                "byte_length": byte_length,
+                "max_bytes": max_bytes,
+                "field": field_name,
+            },
         )
     return byte_length
 

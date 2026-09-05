@@ -57,7 +57,9 @@ def docker_ready():
     if proc_fallback.returncode == 0:
         return "python:3.12-slim"
 
-    pytest.skip(f"Neither '{settings.DOCKER_SANDBOX_IMAGE}' nor 'python:3.12-slim' is available.")
+    pytest.skip(
+        f"Neither '{settings.DOCKER_SANDBOX_IMAGE}' nor 'python:3.12-slim' is available."
+    )
 
 
 # --- Regression Tests: Direct Service Boundary Enforcement ---
@@ -161,7 +163,9 @@ def test_execution_service_direct_workspace_validation(sandbox_workspace, tmp_pa
 
     # 5. Valid workspace succeeds
     with (
-        patch.object(service, "_create_container", return_value="dummy_cid") as mock_create,
+        patch.object(
+            service, "_create_container", return_value="dummy_cid"
+        ) as mock_create,
         patch.object(service, "_start_container"),
         patch.object(service, "_wait_container", return_value=0),
         patch.object(service, "_collect_bounded_logs", return_value=("ok", "", False)),
@@ -262,9 +266,13 @@ def test_docker_live_basic_execution_and_tools(sandbox_workspace, docker_ready):
     )
     assert res_pytest.success is True
     assert res_pytest.output["exit_code"] == 0
-    assert "pytest" in (res_pytest.output["stdout"] + res_pytest.output["stderr"]).lower()
+    assert (
+        "pytest" in (res_pytest.output["stdout"] + res_pytest.output["stderr"]).lower()
+    )
 
-    res_ruff = run_command("ruff --version", workspace_root=sandbox_workspace, image=docker_ready)
+    res_ruff = run_command(
+        "ruff --version", workspace_root=sandbox_workspace, image=docker_ready
+    )
     assert res_ruff.success is True
     assert res_ruff.output["exit_code"] == 0
     assert "ruff" in (res_ruff.output["stdout"] + res_ruff.output["stderr"]).lower()
@@ -298,7 +306,8 @@ def test_docker_live_network_isolation(sandbox_workspace, docker_ready):
     assert res.success is True
     assert res.output["exit_code"] != 0
     assert any(
-        err in res.output["stderr"] for err in ["Network is unreachable", "OSError", "TimeoutError"]
+        err in res.output["stderr"]
+        for err in ["Network is unreachable", "OSError", "TimeoutError"]
     )
 
 
@@ -311,7 +320,10 @@ def test_docker_live_read_only_workspace(sandbox_workspace, docker_ready):
     )
     assert res.success is True
     assert res.output["exit_code"] != 0
-    assert "Read-only file system" in res.output["stderr"] or "OSError" in res.output["stderr"]
+    assert (
+        "Read-only file system" in res.output["stderr"]
+        or "OSError" in res.output["stderr"]
+    )
     assert not (sandbox_workspace / "forbidden.txt").exists()
 
 
@@ -324,10 +336,15 @@ def test_docker_live_root_filesystem_read_only(sandbox_workspace, docker_ready):
     )
     assert res.success is True
     assert res.output["exit_code"] != 0
-    assert "Read-only file system" in res.output["stderr"] or "OSError" in res.output["stderr"]
+    assert (
+        "Read-only file system" in res.output["stderr"]
+        or "OSError" in res.output["stderr"]
+    )
 
 
-def test_docker_live_scratch_temporary_storage_writable(sandbox_workspace, docker_ready):
+def test_docker_live_scratch_temporary_storage_writable(
+    sandbox_workspace, docker_ready
+):
     """Verifies container-local tmpfs (/tmp) is writable and isolated from host."""
     script = (
         "import tempfile, os\n"
@@ -373,7 +390,9 @@ def test_docker_live_host_filesystem_isolation(sandbox_workspace, docker_ready):
             os.unlink(host_secret_path)
 
 
-def test_docker_live_symlink_external_target_unreachable(sandbox_workspace, docker_ready):
+def test_docker_live_symlink_external_target_unreachable(
+    sandbox_workspace, docker_ready
+):
     """Verifies external symlink targets cannot be read from inside the container."""
     with tempfile.NamedTemporaryFile(delete=False) as external_target:
         external_target.write(b"EXTERNAL_HOST_DATA_LEAK")
@@ -433,7 +452,9 @@ def test_docker_live_output_byte_bounded(sandbox_workspace, docker_ready):
     assert len(res.output["stdout"].encode("utf-8")) <= settings.MAX_TOOL_OUTPUT_BYTES
 
 
-def test_docker_live_timeout_terminates_and_removes_container(sandbox_workspace, docker_ready):
+def test_docker_live_timeout_terminates_and_removes_container(
+    sandbox_workspace, docker_ready
+):
     """Verifies timeout kills the process and guarantees zero orphaned containers."""
     res = run_command(
         'python -c "import time; time.sleep(10)"',

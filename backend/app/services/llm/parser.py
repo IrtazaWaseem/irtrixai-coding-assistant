@@ -20,7 +20,9 @@ def parse_structured_output[T: BaseModel](content: str, schema: type[T]) -> T:
         LLMResponseException: If content is missing, invalid JSON, or fails schema validation.
     """
     if not content or not content.strip():
-        raise LLMResponseException("LLM returned empty content; expected structured output.")
+        raise LLMResponseException(
+            "LLM returned empty content; expected structured output."
+        )
 
     # 1. Strip reasoning blocks (<think>...</think>)
     cleaned = re.sub(r"<think>[\s\S]*?</think>", "", content).strip()

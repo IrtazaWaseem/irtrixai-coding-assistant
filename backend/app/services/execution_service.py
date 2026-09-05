@@ -83,15 +83,21 @@ class ExecutionService:
                 shell=False,
             )
         except OSError as err:
-            raise ContainerExecutionException(f"Failed to invoke Docker CLI: {err}") from err
+            raise ContainerExecutionException(
+                f"Failed to invoke Docker CLI: {err}"
+            ) from err
 
         if proc.returncode != 0:
             err_msg = proc.stderr.strip() or proc.stdout.strip()
-            raise ContainerExecutionException(f"Failed to create sandbox container: {err_msg}")
+            raise ContainerExecutionException(
+                f"Failed to create sandbox container: {err_msg}"
+            )
 
         container_id = proc.stdout.strip()
         if not container_id:
-            raise ContainerExecutionException("Docker create produced an empty container ID.")
+            raise ContainerExecutionException(
+                "Docker create produced an empty container ID."
+            )
 
         return container_id
 
@@ -106,7 +112,9 @@ class ExecutionService:
         )
         if proc.returncode != 0:
             err_msg = proc.stderr.strip() or proc.stdout.strip()
-            raise ContainerExecutionException(f"Failed to start sandbox container: {err_msg}")
+            raise ContainerExecutionException(
+                f"Failed to start sandbox container: {err_msg}"
+            )
 
     def _wait_container(
         self,
@@ -175,7 +183,9 @@ class ExecutionService:
                         was_capped[0] = True
                         break
 
-        err_thread = threading.Thread(target=_reader, args=(proc.stderr, stderr_bytes), daemon=True)
+        err_thread = threading.Thread(
+            target=_reader, args=(proc.stderr, stderr_bytes), daemon=True
+        )
         err_thread.start()
 
         _reader(proc.stdout, stdout_bytes)

@@ -27,11 +27,15 @@ def run_command(
 ) -> ToolResult:
     """Executes an allowlisted command securely inside an ephemeral Docker sandbox."""
     effective_timeout = (
-        timeout_seconds if timeout_seconds is not None else settings.SANDBOX_TIMEOUT_SECONDS
+        timeout_seconds
+        if timeout_seconds is not None
+        else settings.SANDBOX_TIMEOUT_SECONDS
     )
     try:
         base_dir = validate_workspace_dir(workspace_root)
-        safe_target_dir = validate_safe_path(base_dir, relative_directory, must_exist=True)
+        safe_target_dir = validate_safe_path(
+            base_dir, relative_directory, must_exist=True
+        )
 
         if not safe_target_dir.is_dir():
             raise ToolExecutionException(

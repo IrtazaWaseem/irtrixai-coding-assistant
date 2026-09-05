@@ -8,7 +8,9 @@ class PlannerOutput(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="ignore")
 
-    summary: str = Field(..., description="High-level reasoning summary and plan objective")
+    summary: str = Field(
+        ..., description="High-level reasoning summary and plan objective"
+    )
     steps: list[str] = Field(..., description="Ordered step-by-step execution plan")
     plan_id: str | None = Field(default=None, description="Optional plan identifier")
     files_expected: list[str] = Field(
@@ -70,7 +72,9 @@ class DebuggerOutput(BaseModel):
     diagnosis: str = Field(
         ..., description="Root-cause diagnosis of failure, test, or runtime defect"
     )
-    proposed_fix: str = Field(..., description="Detailed explanation of proposed remediation")
+    proposed_fix: str = Field(
+        ..., description="Detailed explanation of proposed remediation"
+    )
     files_to_change: list[str] = Field(
         default_factory=list,
         description="Target files identified as requiring modification",
@@ -84,7 +88,9 @@ class DebuggerOutput(BaseModel):
     @classmethod
     def validate_non_empty(cls, v: str) -> str:
         if not v or not v.strip():
-            raise ValueError("Diagnosis and proposed_fix cannot be empty or whitespace.")
+            raise ValueError(
+                "Diagnosis and proposed_fix cannot be empty or whitespace."
+            )
         return v.strip()
 
 

@@ -30,7 +30,9 @@ def remediation_env():
         (root / ".env").write_text(
             "DB_PASSWORD=secret_in_root_env\nAPI_KEY=key123\n", encoding="utf-8"
         )
-        (root / ".env.production").write_text("PROD_SECRET=production_password\n", encoding="utf-8")
+        (root / ".env.production").write_text(
+            "PROD_SECRET=production_password\n", encoding="utf-8"
+        )
         yield root
 
 
@@ -139,7 +141,9 @@ def test_issue_4_security_error_does_not_leak_absolute_workspace_path(remediatio
     assert "escapes workspace boundary" in res.error
 
     with pytest.raises(SecurityViolationException) as exc_info:
-        read_file("../../secret.txt", workspace_root=remediation_env, raise_on_error=True)
+        read_file(
+            "../../secret.txt", workspace_root=remediation_env, raise_on_error=True
+        )
     assert str(remediation_env) not in str(exc_info.value)
 
 

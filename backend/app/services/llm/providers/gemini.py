@@ -109,8 +109,14 @@ class GeminiProvider(LLMProvider):
             or "api key not valid" in lowered
             or "unauthenticated" in lowered
         ):
-            raise LLMAuthenticationException("Gemini API key authentication failed.") from err
-        if "not found" in lowered or "is not supported" in lowered or "unknown model" in lowered:
+            raise LLMAuthenticationException(
+                "Gemini API key authentication failed."
+            ) from err
+        if (
+            "not found" in lowered
+            or "is not supported" in lowered
+            or "unknown model" in lowered
+        ):
             raise LLMInvalidModelException(
                 f"Gemini model '{self.model}' was not found or is unsupported: {msg}"
             ) from err
@@ -120,11 +126,21 @@ class GeminiProvider(LLMProvider):
             or "rate limit" in lowered
             or "429" in lowered
         ):
-            raise LLMRateLimitException(f"Gemini rate limit or quota exceeded: {msg}") from err
-        if "unavailable" in lowered or "503" in lowered or "connection refused" in lowered:
-            raise LLMProviderUnavailableException(f"Gemini service is unavailable: {msg}") from err
+            raise LLMRateLimitException(
+                f"Gemini rate limit or quota exceeded: {msg}"
+            ) from err
+        if (
+            "unavailable" in lowered
+            or "503" in lowered
+            or "connection refused" in lowered
+        ):
+            raise LLMProviderUnavailableException(
+                f"Gemini service is unavailable: {msg}"
+            ) from err
         if "connection" in lowered or "network" in lowered:
-            raise LLMConnectionException(f"Failed to connect to Gemini API: {msg}") from err
+            raise LLMConnectionException(
+                f"Failed to connect to Gemini API: {msg}"
+            ) from err
 
         raise LLMProviderException(f"Gemini provider error: {msg}") from err
 

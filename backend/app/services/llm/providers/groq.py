@@ -39,7 +39,9 @@ class GroqProvider(LLMProvider):
             raise LLMAuthenticationException("Groq API key is required but missing.")
         if not self.model:
             raise LLMInvalidModelException("Groq model ID cannot be empty.")
-        self.base_url = (config.base_url or "https://api.groq.com/openai/v1").rstrip("/")
+        self.base_url = (config.base_url or "https://api.groq.com/openai/v1").rstrip(
+            "/"
+        )
         self._injected_client = client
 
     @property
@@ -98,7 +100,9 @@ class GroqProvider(LLMProvider):
             status = err.response.status_code
             safe_text = self._sanitize(err.response.text)
             if status == 401:
-                raise LLMAuthenticationException("Groq API key authentication failed.") from err
+                raise LLMAuthenticationException(
+                    "Groq API key authentication failed."
+                ) from err
             if status in {400, 404}:
                 raise LLMInvalidModelException(
                     f"Groq model '{self.model}' is invalid or unsupported: {safe_text}"
@@ -111,7 +115,9 @@ class GroqProvider(LLMProvider):
                 raise LLMProviderUnavailableException(
                     f"Groq service unavailable ({status}): {safe_text}"
                 ) from err
-            raise LLMProviderException(f"Groq HTTP error ({status}): {safe_text}") from err
+            raise LLMProviderException(
+                f"Groq HTTP error ({status}): {safe_text}"
+            ) from err
 
     async def generate(
         self,
@@ -132,11 +138,15 @@ class GroqProvider(LLMProvider):
 
         try:
             if self._injected_client is not None:
-                resp = await self._injected_client.post(url, json=payload, headers=self._headers())
+                resp = await self._injected_client.post(
+                    url, json=payload, headers=self._headers()
+                )
                 resp.raise_for_status()
                 data = resp.json()
             else:
-                async with httpx.AsyncClient(timeout=self.config.timeout_seconds) as client:
+                async with httpx.AsyncClient(
+                    timeout=self.config.timeout_seconds
+                ) as client:
                     resp = await client.post(url, json=payload, headers=self._headers())
                     resp.raise_for_status()
                     data = resp.json()
@@ -188,11 +198,15 @@ class GroqProvider(LLMProvider):
 
         try:
             if self._injected_client is not None:
-                resp = await self._injected_client.post(url, json=payload, headers=self._headers())
+                resp = await self._injected_client.post(
+                    url, json=payload, headers=self._headers()
+                )
                 resp.raise_for_status()
                 data = resp.json()
             else:
-                async with httpx.AsyncClient(timeout=self.config.timeout_seconds) as client:
+                async with httpx.AsyncClient(
+                    timeout=self.config.timeout_seconds
+                ) as client:
                     resp = await client.post(url, json=payload, headers=self._headers())
                     resp.raise_for_status()
                     data = resp.json()
@@ -204,7 +218,9 @@ class GroqProvider(LLMProvider):
 
         choices = data.get("choices", [])
         if not choices:
-            raise LLMResponseException("Groq returned no choices for structured output.")
+            raise LLMResponseException(
+                "Groq returned no choices for structured output."
+            )
 
         content = choices[0].get("message", {}).get("content", "")
         return parse_structured_output(content, response_schema)

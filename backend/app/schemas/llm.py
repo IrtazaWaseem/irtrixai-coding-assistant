@@ -12,7 +12,8 @@ class ProviderCapabilities(BaseModel):
         default=True, description="Indicates if provider supports token streaming"
     )
     supports_structured_output: bool = Field(
-        default=True, description="Indicates if provider natively supports JSON schema output"
+        default=True,
+        description="Indicates if provider natively supports JSON schema output",
     )
     supports_tools: bool = Field(
         default=True, description="Indicates if provider supports function/tool calling"
@@ -31,7 +32,8 @@ class ModelInfo(BaseModel):
         ..., description="Normalized provider identifier ('ollama', 'groq', 'gemini')"
     )
     model: str = Field(
-        ..., description="Configured model identifier (e.g. 'qwen-gpu-tuned', 'deepseek-r1:8b')"
+        ...,
+        description="Configured model identifier (e.g. 'qwen-gpu-tuned', 'deepseek-r1:8b')",
     )
     display_name: str = Field(..., description="Human-readable model name")
     capabilities: ProviderCapabilities = Field(
@@ -45,16 +47,21 @@ class LLMConfig(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    provider: str = Field(..., description="Provider identifier: 'ollama', 'groq', or 'gemini'")
+    provider: str = Field(
+        ..., description="Provider identifier: 'ollama', 'groq', or 'gemini'"
+    )
     model: str = Field(..., description="Arbitrary model identifier string")
     api_key: str | None = Field(default=None, repr=False, exclude=True)
     base_url: str | None = Field(
         default=None, description="Endpoint URL for local or self-hosted engines"
     )
     timeout_seconds: int = Field(default=60, description="Request timeout in seconds")
-    max_retries: int = Field(default=3, description="Maximum retries for transient errors")
+    max_retries: int = Field(
+        default=3, description="Maximum retries for transient errors"
+    )
     thinking_level: str = Field(
-        default="low", description="Reasoning/thinking effort level ('low', 'medium', 'high')"
+        default="low",
+        description="Reasoning/thinking effort level ('low', 'medium', 'high')",
     )
 
     def get_api_key(self) -> str | None:
@@ -69,8 +76,12 @@ class LLMResponse(BaseModel):
 
     content: str = Field(..., description="Generated text content")
     model: str = Field(..., description="Model identifier that produced the content")
-    provider: str = Field(..., description="Provider identifier that fulfilled the request")
-    finish_reason: str | None = Field(default=None, description="Generation completion reason")
+    provider: str = Field(
+        ..., description="Provider identifier that fulfilled the request"
+    )
+    finish_reason: str | None = Field(
+        default=None, description="Generation completion reason"
+    )
     raw_usage: dict[str, Any] | None = Field(
         default=None, description="Token consumption metrics if reported"
     )

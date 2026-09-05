@@ -77,7 +77,9 @@ class LLMGateway:
             self.last_used_provider = self.primary.provider_name
             self.last_used_model = self.primary.model
             logger.info(
-                "LLM generation fulfilled by %s (%s)", self.last_used_provider, self.last_used_model
+                "LLM generation fulfilled by %s (%s)",
+                self.last_used_provider,
+                self.last_used_model,
             )
             return res
         except (
@@ -144,7 +146,10 @@ class LLMGateway:
             LLMConnectionException,
             LLMRateLimitException,
         ) as exc:
-            if self.fallback is not None and self.fallback.capabilities.supports_structured_output:
+            if (
+                self.fallback is not None
+                and self.fallback.capabilities.supports_structured_output
+            ):
                 logger.warning(
                     "Primary provider '%s' failed (%s); triggering fallback structured provider '%s'",
                     self.primary.provider_name,
@@ -195,7 +200,10 @@ class LLMGateway:
             LLMConnectionException,
             LLMRateLimitException,
         ) as exc:
-            if self.fallback is not None and self.fallback.capabilities.supports_streaming:
+            if (
+                self.fallback is not None
+                and self.fallback.capabilities.supports_streaming
+            ):
                 logger.warning(
                     "Primary provider '%s' stream failed (%s); triggering fallback stream '%s' (yielded_any=%s)",
                     self.primary.provider_name,

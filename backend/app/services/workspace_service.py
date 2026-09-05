@@ -64,7 +64,9 @@ class WorkspaceService:
         return result.scalars().all()
 
     @staticmethod
-    async def get_workspace_by_id(db: AsyncSession, workspace_id: uuid.UUID) -> Workspace:
+    async def get_workspace_by_id(
+        db: AsyncSession, workspace_id: uuid.UUID
+    ) -> Workspace:
         stmt = select(Workspace).where(Workspace.id == workspace_id)
         workspace = (await db.execute(stmt)).scalar_one_or_none()
         if not workspace:

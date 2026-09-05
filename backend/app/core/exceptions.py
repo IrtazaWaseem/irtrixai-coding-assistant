@@ -85,7 +85,9 @@ class ContainerTimeoutException(ExecutionTimeoutException):
         command: str | None = None,
         details: dict[str, Any] | None = None,
     ) -> None:
-        super().__init__(timeout_seconds=timeout_seconds, command=command, details=details)
+        super().__init__(
+            timeout_seconds=timeout_seconds, command=command, details=details
+        )
 
 
 class ToolExecutionException(AppException):
@@ -95,7 +97,9 @@ class ToolExecutionException(AppException):
         status_code: int = 400,
         details: dict[str, Any] | None = None,
     ) -> None:
-        super().__init__(message=message, status_code=status_code, details=details or {})
+        super().__init__(
+            message=message, status_code=status_code, details=details or {}
+        )
 
 
 class ContainerExecutionException(AppException):
@@ -107,7 +111,9 @@ class ContainerExecutionException(AppException):
         status_code: int = 500,
         details: dict[str, Any] | None = None,
     ) -> None:
-        super().__init__(message=message, status_code=status_code, details=details or {})
+        super().__init__(
+            message=message, status_code=status_code, details=details or {}
+        )
 
 
 # --- LLM Gateway & Provider Exceptions ---

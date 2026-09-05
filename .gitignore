@@ -49,3 +49,5 @@ workspaces/*
 *.swo
 .DS_Store
 Thumbs.db
+# Build caches
+*.tsbuildinfo

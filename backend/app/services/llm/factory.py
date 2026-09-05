@@ -13,7 +13,9 @@ class LLMFactory:
     """Registry and factory for constructing provider instances."""
 
     @classmethod
-    def create_provider(cls, config: LLMConfig | None = None, client: Any = None) -> LLMProvider:
+    def create_provider(
+        cls, config: LLMConfig | None = None, client: Any = None
+    ) -> LLMProvider:
         cfg = config or settings.get_primary_llm_config()
         prov = cfg.provider.strip().lower()
         if prov == "ollama":

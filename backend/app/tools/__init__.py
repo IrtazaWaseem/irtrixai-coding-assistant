@@ -1,4 +1,8 @@
-from app.core.constants import ALLOWLISTED_EXECUTABLES, FORBIDDEN_COMMAND_TOKENS, is_protected_file
+from app.core.constants import (
+    ALLOWLISTED_EXECUTABLES,
+    FORBIDDEN_COMMAND_TOKENS,
+    is_protected_file,
+)
 from app.core.exceptions import (
     ContainerExecutionException,
     ContainerTimeoutException,
