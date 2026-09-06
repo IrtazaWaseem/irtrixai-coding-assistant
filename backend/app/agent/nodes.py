@@ -1,7 +1,9 @@
 import logging
 from typing import Any
 
-from app.agent.state import AgentState
+from langgraph.types import interrupt
+
+from app.agent.state import MAX_REPAIR_ITERATIONS, AgentState
 from app.schemas.agent_contracts import (
     CoderOutput,
     DebuggerOutput,
@@ -22,7 +24,8 @@ async def inspect_workspace(state: AgentState) -> dict[str, Any]:
     existing_stack = state.get("tech_stack", [])
 
     return {
-        "workspace_summary": existing_summary or f"Workspace root at {workspace_path}",
+        "workspace_summary": existing_summary
+        or f"[STUB] Workspace root at {workspace_path}",
         "tech_stack": existing_stack or ["python"],
         "current_step": 1,
     }
@@ -36,7 +39,7 @@ async def planner(state: AgentState) -> dict[str, Any]:
         return {"plan": existing_plan, "current_step": 2}
 
     default_plan = PlannerOutput(
-        summary="Analyze workspace and apply requested changes",
+        summary="[STUB] Analyze workspace and apply requested changes",
         steps=["Inspect target files", "Apply patch", "Run verification tests"],
         files_expected=[],
     )
@@ -47,59 +50,69 @@ async def coder(state: AgentState) -> dict[str, Any]:
     """Proposes code modifications and produces unified patch for review."""
     logger.info("Node [coder] generating code patches.")
     existing_proposal = state.get("coder_proposal")
-    if existing_proposal is not None:
+    feedback = state.get("feedback")
+
+    # If already proposed and not in a rejection/feedback revision loop, reuse
+    if existing_proposal is not None and state.get("approval") is not False:
         return {
             "coder_proposal": existing_proposal,
             "pending_patch": existing_proposal.patch,
             "current_step": 3,
         }
 
+    summary = (
+        f"[STUB] Implementation revised based on feedback: {feedback}"
+        if feedback
+        else "[STUB] Implementation changes proposed"
+    )
     default_proposal = CoderOutput(
-        summary="Implementation changes proposed",
+        summary=summary,
         requested_changes=["Update implementation"],
-        patch="# Proposed patch\n",
+        patch="# [STUB] Proposed patch placeholder\n",
         files_changed=[],
     )
-    return {
+    updates: dict[str, Any] = {
         "coder_proposal": default_proposal,
         "pending_patch": default_proposal.patch,
         "current_step": 3,
     }
+    # A revised proposal requires fresh human approval
+    if state.get("approval") is False:
+        updates["approval"] = None
+
+    return updates
 
 
 async def approval_gate(state: AgentState) -> dict[str, Any]:
     """Enforces human-in-the-loop verification before changes are applied or executed."""
     logger.info("Node [approval_gate] validating human approval status.")
 
-    if state.get("approval") is None:
-        try:
-            from langgraph.types import interrupt
+    approval = state.get("approval")
+    feedback = state.get("feedback")
 
-            interruption_payload = {
-                "action": "human_approval_required",
-                "pending_patch": state.get("pending_patch"),
-                "coder_summary": (
-                    state["coder_proposal"].summary
-                    if state.get("coder_proposal")
-                    else None
-                ),
-            }
-            res = interrupt(interruption_payload)
-            if isinstance(res, dict):
-                return {
-                    "approval": bool(res.get("approved", False)),
-                    "feedback": res.get("feedback"),
-                    "current_step": 4,
-                }
-            if isinstance(res, bool):
-                return {"approval": res, "current_step": 4}
-        except Exception:
-            pass
+    # If approval has not been resolved yet, interrupt graph execution for human decision
+    if approval is None:
+        interruption_payload = {
+            "action": "human_approval_required",
+            "pending_patch": state.get("pending_patch"),
+            "coder_summary": (
+                state["coder_proposal"].summary if state.get("coder_proposal") else None
+            ),
+        }
+        res = interrupt(interruption_payload)
+
+        # When resumed via Command(resume=...), process the human operator response
+        if isinstance(res, dict):
+            approval = bool(res.get("approved", False))
+            feedback = res.get("feedback")
+        elif isinstance(res, bool):
+            approval = res
+        else:
+            approval = False
 
     return {
-        "approval": (
-            state.get("approval") if state.get("approval") is not None else True
-        ),
+        "approval": approval,
+        "feedback": feedback,
         "current_step": 4,
     }
 
@@ -114,7 +127,8 @@ async def test_runner(state: AgentState) -> dict[str, Any]:
     default_result = {
         "success": True,
         "exit_code": 0,
-        "output": "1 passed",
+        "output": "[STUB] Skeleton test execution placeholder - unverified",
+        "is_stub": True,
     }
     return {
         "test_command": state.get("test_command") or "pytest",
@@ -126,13 +140,21 @@ async def test_runner(state: AgentState) -> dict[str, Any]:
 async def debugger(state: AgentState) -> dict[str, Any]:
     """Diagnoses test failures, proposes fixes, and increments the repair counter."""
     current_repairs = state.get("repair_count", 0) + 1
+    if current_repairs > MAX_REPAIR_ITERATIONS:
+        logger.error(
+            "Node [debugger] invoked beyond MAX_REPAIR_ITERATIONS (%d > %d).",
+            current_repairs,
+            MAX_REPAIR_ITERATIONS,
+        )
+        current_repairs = MAX_REPAIR_ITERATIONS
+
     logger.warning(
         "Node [debugger] diagnosing failure (repair cycle %d).", current_repairs
     )
 
     diagnostic = DebuggerOutput(
-        diagnosis="Test verification failed; diagnosing root cause",
-        proposed_fix="Adjust implementation to address test assertion",
+        diagnosis="[STUB] Test verification failed; diagnosing root cause",
+        proposed_fix="[STUB] Adjust implementation to address test assertion",
         files_to_change=[],
     )
 
@@ -146,9 +168,13 @@ async def debugger(state: AgentState) -> dict[str, Any]:
 async def reviewer(state: AgentState) -> dict[str, Any]:
     """Performs final code quality and architectural review."""
     logger.info("Node [reviewer] auditing completed implementation.")
+    existing_review = state.get("review_summary")
+    if existing_review is not None:
+        return {"review_summary": existing_review, "current_step": 7}
+
     review = ReviewerOutput(
         verdict="approved",
-        summary="All tests passing and implementation verified",
+        summary="[STUB] Skeleton review placeholder - pending model verification in Part 2",
         issues=[],
         security_concerns=[],
         required_changes=[],
@@ -165,19 +191,27 @@ async def finalize(state: AgentState) -> dict[str, Any]:
 
     test_res = state.get("test_result") or {}
     test_passed = test_res.get("success", False)
-    approval = state.get("approval", True)
+    approval = state.get("approval")
 
-    if not approval:
+    if approval is False:
         status = "aborted"
         summary = (
             f"Workflow aborted by human operator: {state.get('feedback', 'Rejected')}"
         )
     elif test_passed:
+        is_stub = test_res.get("is_stub", False)
         status = "completed"
-        summary = "Task completed successfully and all tests verified"
+        if is_stub:
+            summary = "[STUB] Skeleton workflow completed with placeholder execution"
+        else:
+            summary = "Task completed successfully and all tests verified"
     else:
         status = "failed"
         summary = f"Task failed after {state.get('repair_count', 0)} repair attempts."
+
+    executed_tests: list[str] = []
+    if state.get("test_command"):
+        executed_tests.append(str(state["test_command"]))
 
     final = FinalizationResult(
         status=status,
@@ -185,7 +219,7 @@ async def finalize(state: AgentState) -> dict[str, Any]:
         files_changed=(
             state["coder_proposal"].files_changed if state.get("coder_proposal") else []
         ),
-        tests=[state.get("test_command") or "pytest"],
+        tests=executed_tests,
         review=state.get("review_summary"),
     )
 

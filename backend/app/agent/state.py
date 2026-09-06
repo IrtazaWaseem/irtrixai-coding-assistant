@@ -90,6 +90,11 @@ def validate_state_invariants(state: AgentState) -> None:
     repair_count = state.get("repair_count", 0)
     if repair_count < 0:
         raise ValueError("Graph invariant violated: repair_count cannot be negative.")
+    if repair_count > MAX_REPAIR_ITERATIONS:
+        raise ValueError(
+            f"Graph invariant violated: repair_count ({repair_count}) "
+            f"exceeds MAX_REPAIR_ITERATIONS ({MAX_REPAIR_ITERATIONS})."
+        )
 
     # Invariant: No live network clients or API secrets stored directly in graph state
     for key, value in state.items():

@@ -26,7 +26,9 @@ def route_after_approval(
         if state.get("feedback"):
             return "coder"
         return "finalize"
-    return "test_runner"
+    if approval is True:
+        return "test_runner"
+    return "finalize"
 
 
 def route_after_test(
