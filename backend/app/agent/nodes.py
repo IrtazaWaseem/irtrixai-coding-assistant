@@ -354,7 +354,6 @@ async def reviewer(
             system_instruction=SYSTEM_SECURITY_INSTRUCTION,
         )
 
-        # Invariant Defense: Model cannot override authoritative test reality
         if not test_passed and review.verdict == "approved":
             logger.warning(
                 "Overriding invalid Reviewer verdict 'approved': authoritative tests did not pass."
@@ -391,6 +390,7 @@ async def finalize(state: AgentState) -> dict[str, Any]:
 
     test_res = state.get("test_result")
     test_passed = isinstance(test_res, dict) and test_res.get("success") is True
+    is_stub = isinstance(test_res, dict) and test_res.get("is_stub") is True
     approval = state.get("approval")
     error = state.get("error")
     review = state.get("review_summary")
@@ -412,7 +412,11 @@ async def finalize(state: AgentState) -> dict[str, Any]:
             summary = "Task failed: test verification was never executed."
         else:
             summary = f"Task failed: tests did not pass (repair count: {state.get('repair_count', 0)})."
-    # 4. Reviewer verdict governance: must be approved to complete
+    # 4. Stub/placeholder execution cannot produce completed status -> failed
+    elif is_stub:
+        status = "failed"
+        summary = "Task failed: test verification was only a placeholder/stub."
+    # 5. Reviewer verdict governance: must be approved to complete
     elif review is None:
         status = "failed"
         summary = "Task failed: code review was not completed."
@@ -424,13 +428,7 @@ async def finalize(state: AgentState) -> dict[str, Any]:
         summary = f"Task failed: reviewer requested changes: {review.summary}"
     elif review.verdict == "approved" and approval is True:
         status = "completed"
-        is_stub = (
-            test_res.get("is_stub", False) if isinstance(test_res, dict) else False
-        )
-        if is_stub:
-            summary = "[STUB] Skeleton workflow completed with placeholder execution"
-        else:
-            summary = "Task completed successfully and all tests verified"
+        summary = "Task completed successfully and all tests verified"
     else:
         status = "failed"
         summary = "Task failed: completion criteria not satisfied."

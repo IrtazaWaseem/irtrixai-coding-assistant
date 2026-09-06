@@ -181,7 +181,7 @@ def test_route_after_test_repair_limits():
 
 @pytest.mark.asyncio
 async def test_in_memory_graph_happy_path_preapproved(mock_gateway_fixture):
-    """Executes full graph in-memory with pre-approved state verifying completion."""
+    """Executes full graph in-memory with pre-approved state and verified non-stub test results."""
     graph = build_agent_graph()
     initial = create_initial_state(
         task_id="task-001",
@@ -190,6 +190,11 @@ async def test_in_memory_graph_happy_path_preapproved(mock_gateway_fixture):
         prompt="Implement calculator",
     )
     initial["approval"] = True
+    initial["test_result"] = {
+        "success": True,
+        "output": "3 passed",
+        "is_stub": False,
+    }
 
     config = {"configurable": {"thread_id": "thread-test-run-1"}}
     final_state = await graph.ainvoke(initial, config=config)
@@ -200,6 +205,31 @@ async def test_in_memory_graph_happy_path_preapproved(mock_gateway_fixture):
     assert isinstance(final_state["review_summary"], ReviewerOutput)
     assert isinstance(final_state["final_result"], FinalizationResult)
     assert final_state["final_result"].status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_in_memory_graph_default_stub_test_runner_fails_finalization(
+    mock_gateway_fixture,
+):
+    """Verifies end-to-end graph using default test_runner stub produces failed finalization."""
+    graph = build_agent_graph()
+    initial = create_initial_state(
+        task_id="task-stub-1",
+        workspace_path="/mock/workspace",
+        thread_id="thread-stub-test-1",
+        prompt="Implement calculator",
+    )
+    initial["approval"] = True
+
+    config = {"configurable": {"thread_id": "thread-stub-test-1"}}
+    final_state = await graph.ainvoke(initial, config=config)
+
+    assert final_state["final_result"].status == "failed"
+    assert final_state["final_result"].status != "completed"
+    assert (
+        "stub" in final_state["final_result"].summary.lower()
+        or "placeholder" in final_state["final_result"].summary.lower()
+    )
 
 
 @pytest.mark.asyncio
@@ -234,7 +264,7 @@ async def test_hitl_unresolved_approval_interrupts(mock_gateway_fixture):
 
 @pytest.mark.asyncio
 async def test_hitl_resume_with_approval(mock_gateway_fixture):
-    """Resuming an interrupted thread with approval=True completes workflow."""
+    """Resuming an interrupted thread with approval=True and verified test results completes workflow."""
     graph = build_agent_graph()
     thread_id = "thread-hitl-resume-approved"
     config = {"configurable": {"thread_id": thread_id}}
@@ -245,6 +275,11 @@ async def test_hitl_resume_with_approval(mock_gateway_fixture):
         thread_id=thread_id,
         prompt="Add metrics endpoint",
     )
+    initial["test_result"] = {
+        "success": True,
+        "output": "3 passed",
+        "is_stub": False,
+    }
 
     await graph.ainvoke(initial, config=config)
     assert graph.get_state(config).next == ("approval_gate",)
@@ -551,11 +586,51 @@ def test_model_output_has_no_execution_authority():
 
 
 @pytest.mark.asyncio
-async def test_finalize_tests_pass_reviewer_approved_completed():
-    """Verifies tests pass + reviewer approved produces completed status."""
+async def test_finalize_success_true_is_stub_false_approved_completed():
+    """Verifies success=True, is_stub=False, approved reviewer, human approval -> completed."""
     state = create_initial_state("1", "/test", "t1")
     state["approval"] = True
     state["test_result"] = {"success": True, "output": "3 passed", "is_stub": False}
+    state["review_summary"] = ReviewerOutput(
+        verdict="approved",
+        summary="Verified",
+        issues=[],
+        security_concerns=[],
+        required_changes=[],
+    )
+    res = await finalize(state)
+    assert res["final_result"].status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_finalize_success_true_is_stub_true_approved_failed():
+    """Verifies success=True, is_stub=True, approved reviewer, human approval -> failed."""
+    state = create_initial_state("1", "/test", "t1")
+    state["approval"] = True
+    state["test_result"] = {"success": True, "output": "Stub passed", "is_stub": True}
+    state["review_summary"] = ReviewerOutput(
+        verdict="approved",
+        summary="Verified",
+        issues=[],
+        security_concerns=[],
+        required_changes=[],
+    )
+    res = await finalize(state)
+    assert res["final_result"].status == "failed"
+    assert res["final_result"].status != "completed"
+    assert (
+        "placeholder" in res["final_result"].summary.lower()
+        or "stub" in res["final_result"].summary.lower()
+    )
+
+
+@pytest.mark.asyncio
+async def test_finalize_success_true_missing_is_stub_approved_completed():
+    """Verifies success=True with missing is_stub preserves existing intended behavior (completed)."""
+    state = create_initial_state("1", "/test", "t1")
+    state["approval"] = True
+    # Notice: is_stub key is omitted completely
+    state["test_result"] = {"success": True, "output": "3 passed in sandbox"}
     state["review_summary"] = ReviewerOutput(
         verdict="approved",
         summary="Verified",
@@ -572,7 +647,7 @@ async def test_finalize_tests_pass_reviewer_rejected_not_completed():
     """Verifies tests pass + reviewer rejected produces failed status, not completed."""
     state = create_initial_state("1", "/test", "t1")
     state["approval"] = True
-    state["test_result"] = {"success": True, "output": "3 passed"}
+    state["test_result"] = {"success": True, "output": "3 passed", "is_stub": False}
     state["review_summary"] = ReviewerOutput(
         verdict="rejected",
         summary="Security flaw detected",
@@ -591,7 +666,7 @@ async def test_finalize_tests_pass_reviewer_changes_requested_not_completed():
     """Verifies tests pass + reviewer changes_requested produces failed status, not completed."""
     state = create_initial_state("1", "/test", "t1")
     state["approval"] = True
-    state["test_result"] = {"success": True, "output": "3 passed"}
+    state["test_result"] = {"success": True, "output": "3 passed", "is_stub": False}
     state["review_summary"] = ReviewerOutput(
         verdict="changes_requested",
         summary="Refactoring required",
@@ -611,6 +686,24 @@ async def test_finalize_truthy_string_false_not_treated_as_passed():
     state = create_initial_state("1", "/test", "t1")
     state["approval"] = True
     state["test_result"] = {"success": "false", "output": "Tests failed"}
+    state["review_summary"] = ReviewerOutput(
+        verdict="approved",
+        summary="Verified",
+        issues=[],
+        security_concerns=[],
+        required_changes=[],
+    )
+    res = await finalize(state)
+    assert res["final_result"].status == "failed"
+    assert res["final_result"].status != "completed"
+
+
+@pytest.mark.asyncio
+async def test_finalize_truthy_string_true_not_treated_as_passed():
+    """Verifies string 'true' in test_result is not treated as boolean True."""
+    state = create_initial_state("1", "/test", "t1")
+    state["approval"] = True
+    state["test_result"] = {"success": "true", "output": "Tests passed"}
     state["review_summary"] = ReviewerOutput(
         verdict="approved",
         summary="Verified",
