@@ -14,15 +14,7 @@ def validate_workspace_path(
     workspace_path: str | Path,
     trusted_base: str | Path | None = None,
 ) -> Path:
-    """Validates that a workspace path exists, is a directory, and resolves within trusted boundaries.
-
-    Guarantees:
-    1. Path is not empty.
-    2. Path exists and is a directory.
-    3. If trusted_base is provided (or if checking against allowed base boundaries),
-       resolves safely without escaping via traversal or symlinks.
-    4. Real path is strictly verified.
-    """
+    """Validates that a workspace path exists, is a directory, and resolves within trusted boundaries."""
     if not workspace_path:
         raise AppException("Workspace path cannot be empty.", status_code=400)
 
@@ -56,14 +48,12 @@ def validate_workspace_path(
     return resolved
 
 
-def resolve_safe_path(base_directory: str | Path, target_path: str | Path) -> Path:
-    """Resolves target_path strictly within base_directory.
+# Compatibility alias
+validate_workspace_dir = validate_workspace_path
 
-    Prevents directory traversal (../), absolute escapes, and symlink escapes.
-    Raises SecurityViolationException if the resolved path is outside base_directory.
-    The exception message deliberately excludes the host's absolute base_directory
-    to prevent filesystem topology disclosure.
-    """
+
+def resolve_safe_path(base_directory: str | Path, target_path: str | Path) -> Path:
+    """Resolves target_path strictly within base_directory."""
     base = Path(base_directory).resolve()
     target = Path(target_path)
 
@@ -81,6 +71,10 @@ def resolve_safe_path(base_directory: str | Path, target_path: str | Path) -> Pa
         )
 
     return resolved
+
+
+# Compatibility alias
+validate_safe_path = resolve_safe_path
 
 
 def truncate_output(
@@ -125,15 +119,7 @@ def _has_unquoted_shell_operators(command_str: str) -> tuple[bool, str]:
 
 
 def validate_command(command: str | list[str]) -> list[str]:
-    """Validates and parses a command string or token list into deterministic argv tokens.
-
-    Enforces:
-    1. Command is non-empty.
-    2. No unquoted shell chaining or redirection operators (; & | < > ` $).
-    3. argv[0] must be a bare name without path separators (/ or \\).
-    4. argv[0] must exactly match an entry in ALLOWLISTED_EXECUTABLES.
-    5. Tokens do not contain forbidden shell control operators.
-    """
+    """Validates and parses a command string or token list into deterministic argv tokens."""
     if isinstance(command, str):
         if not command or not command.strip():
             raise DisallowedCommandException("Command string cannot be empty.")

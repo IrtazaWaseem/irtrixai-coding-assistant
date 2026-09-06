@@ -10,6 +10,7 @@ from app.core.exceptions import (
     LLMAuthenticationException,
     LLMConnectionException,
     LLMInvalidModelException,
+    LLMProviderUnavailableException,
     LLMRateLimitException,
     LLMTimeoutException,
 )
@@ -41,7 +42,10 @@ async def test_ollama_qwen_generate():
             status_code=200,
             json={
                 "model": "qwen-gpu-tuned",
-                "message": {"role": "assistant", "content": "print('hello world')"},
+                "message": {
+                    "role": "assistant",
+                    "content": "print('hello world')",
+                },
                 "done": True,
                 "done_reason": "stop",
                 "prompt_eval_count": 8,
@@ -104,7 +108,11 @@ async def test_ollama_streaming():
         json.dumps({"message": {"content": "def "}, "done": False}) + "\n",
         json.dumps({"message": {"content": "foo():"}, "done": False}) + "\n",
         json.dumps(
-            {"message": {"content": " pass"}, "done": True, "done_reason": "stop"}
+            {
+                "message": {"content": " pass"},
+                "done": True,
+                "done_reason": "stop",
+            }
         )
         + "\n",
     ]
@@ -249,7 +257,7 @@ async def test_gemini_arbitrary_model_generate():
     info = provider.get_model_info()
     assert info.provider == "gemini"
     assert info.model == "gemini-2.5-flash"
-    assert info.display_name == "Gemini (gemini-2.5-flash)"
+    assert info.display_name == "Google Gemini (gemini-2.5-flash)"
 
     res = await provider.generate("Hello Gemini")
     assert res.content == "Generated from Gemini Flash"
@@ -305,6 +313,34 @@ async def test_gemini_error_mapping():
         await provider.generate("hi")
 
 
+def test_gemini_error_mapping_status_code():
+    """Verifies GeminiProvider._map_error recognizes numeric status_code attributes."""
+    config = LLMConfig(
+        provider="gemini",
+        model="gemini-2.5-flash",
+        api_key="AIzaSySecretDoNotLeak",
+    )
+    provider = GeminiProvider(config, client=MagicMock())
+
+    class CustomHttpError(Exception):
+        def __init__(self, code: int, msg: str):
+            super().__init__(msg)
+            self.status_code = code
+
+    err_429 = provider._map_error(CustomHttpError(429, "custom limit reached"))
+    assert isinstance(err_429, LLMRateLimitException)
+    assert "AIzaSySecretDoNotLeak" not in str(err_429)
+
+    err_401 = provider._map_error(CustomHttpError(401, "custom bad auth"))
+    assert isinstance(err_401, LLMAuthenticationException)
+
+    err_404 = provider._map_error(CustomHttpError(404, "custom missing model"))
+    assert isinstance(err_404, LLMInvalidModelException)
+
+    err_503 = provider._map_error(CustomHttpError(503, "custom unavailable"))
+    assert isinstance(err_503, LLMProviderUnavailableException)
+
+
 # --- Gateway Fallback & Secret Isolation Tests ---
 
 
@@ -324,7 +360,10 @@ async def test_gateway_transient_fallback_success():
             status_code=200,
             json={
                 "model": "qwen-gpu-tuned",
-                "message": {"role": "assistant", "content": "Fallback Ollama Success"},
+                "message": {
+                    "role": "assistant",
+                    "content": "Fallback Ollama Success",
+                },
                 "done": True,
             },
         )
