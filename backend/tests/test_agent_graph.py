@@ -472,7 +472,6 @@ async def test_reviewer_node_structured_output():
 async def test_reviewer_cannot_override_failed_test():
     """Verifies reviewer cannot issue 'approved' verdict if test_result indicates failure."""
     mock_gw = MagicMock(spec=LLMGateway)
-    # Model mistakenly claims approved even though test failed
     hallucinated_approval = ReviewerOutput(
         verdict="approved",
         summary="Looks great to me!",
@@ -485,7 +484,28 @@ async def test_reviewer_cannot_override_failed_test():
     res = await reviewer(state, config={"configurable": {"llm_gateway": mock_gw}})
 
     assert res["review_summary"].verdict == "rejected"
-    assert "Automated override" in res["review_summary"].summary
+    assert "automated override" in res["review_summary"].summary.lower()
+
+
+@pytest.mark.asyncio
+async def test_reviewer_cannot_override_unverified_truthy_string_test():
+    """Verifies reviewer coerces approved to rejected when test success is a truthy string."""
+    mock_gw = MagicMock(spec=LLMGateway)
+    mock_gw.generate_structured = AsyncMock(
+        return_value=ReviewerOutput(
+            verdict="approved",
+            summary="Approved regardless of tests",
+            issues=[],
+            security_concerns=[],
+            required_changes=[],
+        )
+    )
+    state = create_initial_state("1", "/test", "t1")
+    state["test_result"] = {"success": "false", "output": "Tests crashed"}
+
+    res = await reviewer(state, config={"configurable": {"llm_gateway": mock_gw}})
+    assert res["review_summary"].verdict == "rejected"
+    assert "automated override" in res["review_summary"].summary.lower()
 
 
 @pytest.mark.asyncio
@@ -495,7 +515,13 @@ async def test_finalize_reflects_actual_evidence_only():
     state["approval"] = True
     state["test_result"] = {"success": True, "is_stub": False}
     state["test_command"] = "pytest tests/unit"
-    # Coder proposed file change, but applied_diff was never populated by tool boundary
+    state["review_summary"] = ReviewerOutput(
+        verdict="approved",
+        summary="All checks verified",
+        issues=[],
+        security_concerns=[],
+        required_changes=[],
+    )
     state["coder_proposal"] = CoderOutput(
         summary="Proposed changes", files_changed=["unapplied.py"]
     )
@@ -517,6 +543,136 @@ def test_model_output_has_no_execution_authority():
         files_changed=["../../etc/passwd"],
     )
     assert len(malicious_proposal.files_changed) == 1
-    # Filesystem and sandbox tools remain authoritative; DTO is inert data
     assert not hasattr(malicious_proposal, "apply")
     assert not hasattr(malicious_proposal, "execute")
+
+
+# --- Reviewer Governance & Evidence Safety Tests ---
+
+
+@pytest.mark.asyncio
+async def test_finalize_tests_pass_reviewer_approved_completed():
+    """Verifies tests pass + reviewer approved produces completed status."""
+    state = create_initial_state("1", "/test", "t1")
+    state["approval"] = True
+    state["test_result"] = {"success": True, "output": "3 passed", "is_stub": False}
+    state["review_summary"] = ReviewerOutput(
+        verdict="approved",
+        summary="Verified",
+        issues=[],
+        security_concerns=[],
+        required_changes=[],
+    )
+    res = await finalize(state)
+    assert res["final_result"].status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_finalize_tests_pass_reviewer_rejected_not_completed():
+    """Verifies tests pass + reviewer rejected produces failed status, not completed."""
+    state = create_initial_state("1", "/test", "t1")
+    state["approval"] = True
+    state["test_result"] = {"success": True, "output": "3 passed"}
+    state["review_summary"] = ReviewerOutput(
+        verdict="rejected",
+        summary="Security flaw detected",
+        issues=["SQL injection"],
+        security_concerns=["Raw query concatenation"],
+        required_changes=["Use parameterized queries"],
+    )
+    res = await finalize(state)
+    assert res["final_result"].status == "failed"
+    assert res["final_result"].status != "completed"
+    assert "reviewer rejected" in res["final_result"].summary.lower()
+
+
+@pytest.mark.asyncio
+async def test_finalize_tests_pass_reviewer_changes_requested_not_completed():
+    """Verifies tests pass + reviewer changes_requested produces failed status, not completed."""
+    state = create_initial_state("1", "/test", "t1")
+    state["approval"] = True
+    state["test_result"] = {"success": True, "output": "3 passed"}
+    state["review_summary"] = ReviewerOutput(
+        verdict="changes_requested",
+        summary="Refactoring required",
+        issues=["High cyclomatic complexity"],
+        security_concerns=[],
+        required_changes=["Break function into smaller helpers"],
+    )
+    res = await finalize(state)
+    assert res["final_result"].status == "failed"
+    assert res["final_result"].status != "completed"
+    assert "changes" in res["final_result"].summary.lower()
+
+
+@pytest.mark.asyncio
+async def test_finalize_truthy_string_false_not_treated_as_passed():
+    """Verifies string 'false' in test_result is not treated as boolean True."""
+    state = create_initial_state("1", "/test", "t1")
+    state["approval"] = True
+    state["test_result"] = {"success": "false", "output": "Tests failed"}
+    state["review_summary"] = ReviewerOutput(
+        verdict="approved",
+        summary="Verified",
+        issues=[],
+        security_concerns=[],
+        required_changes=[],
+    )
+    res = await finalize(state)
+    assert res["final_result"].status == "failed"
+    assert res["final_result"].status != "completed"
+
+
+@pytest.mark.asyncio
+async def test_finalize_truthy_integer_not_treated_as_passed():
+    """Verifies integer 1 in test_result is not treated as boolean True."""
+    state = create_initial_state("1", "/test", "t1")
+    state["approval"] = True
+    state["test_result"] = {"success": 1, "output": "Exit code 1"}
+    state["review_summary"] = ReviewerOutput(
+        verdict="approved",
+        summary="Verified",
+        issues=[],
+        security_concerns=[],
+        required_changes=[],
+    )
+    res = await finalize(state)
+    assert res["final_result"].status == "failed"
+    assert res["final_result"].status != "completed"
+
+
+@pytest.mark.asyncio
+async def test_finalize_missing_test_result_not_completed():
+    """Verifies missing test result causes finalization failure, not completed."""
+    state = create_initial_state("1", "/test", "t1")
+    state["approval"] = True
+    state["test_result"] = None
+    state["review_summary"] = ReviewerOutput(
+        verdict="approved",
+        summary="Verified",
+        issues=[],
+        security_concerns=[],
+        required_changes=[],
+    )
+    res = await finalize(state)
+    assert res["final_result"].status == "failed"
+    assert res["final_result"].status != "completed"
+    assert "never executed" in res["final_result"].summary.lower()
+
+
+@pytest.mark.asyncio
+async def test_node_error_handling_sanitizes_secrets():
+    """Verifies node error handling redacts API keys and bearer tokens from state error."""
+    mock_gw = MagicMock(spec=LLMGateway)
+    fake_token = "gsk_super_secret_groq_key_987654321"
+    mock_gw.generate_structured = AsyncMock(
+        side_effect=Exception(f"Failed connecting with Bearer {fake_token}")
+    )
+
+    state = create_initial_state("1", "/test", "t1", prompt="Add endpoint")
+    res = await planner(state, config={"configurable": {"llm_gateway": mock_gw}})
+
+    assert "error" in res
+    err_text = res["error"]
+    assert fake_token not in err_text
+    assert "Bearer [REDACTED]" in err_text

@@ -35,8 +35,8 @@ def route_after_test(
     state: AgentState,
 ) -> Literal["reviewer", "debugger", "finalize"]:
     """Routes based on test outcomes and strictly enforces max 3 repair iterations."""
-    test_res = state.get("test_result") or {}
-    success = test_res.get("success", False)
+    test_res = state.get("test_result")
+    success = isinstance(test_res, dict) and test_res.get("success") is True
 
     if success:
         return "reviewer"

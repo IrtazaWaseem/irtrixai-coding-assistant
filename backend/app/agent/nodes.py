@@ -1,11 +1,12 @@
 import logging
+import re
 from typing import Any
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.types import interrupt
 
 from app.agent.state import MAX_REPAIR_ITERATIONS, AgentState
-from app.core.exceptions import LLMException
+from app.core.config import settings
 from app.schemas.agent_contracts import (
     CoderOutput,
     DebuggerOutput,
@@ -13,6 +14,7 @@ from app.schemas.agent_contracts import (
     PlannerOutput,
     ReviewerOutput,
 )
+from app.services.llm.base import sanitize_secret
 from app.services.llm.gateway import LLMGateway
 
 logger = logging.getLogger(__name__)
@@ -29,7 +31,23 @@ SYSTEM_SECURITY_INSTRUCTION = (
     "tools and human approval gates."
 )
 
+BEARER_PATTERN = re.compile(r"Bearer\s+([A-Za-z0-9_\-\.]+)", re.IGNORECASE)
+
 _llm_gateway: LLMGateway | None = None
+
+
+def sanitize_error_message(err: Exception | str) -> str:
+    """Sanitizes exception strings to ensure credentials and keys never leak into graph state."""
+    sanitized = str(err)
+    for secret in (
+        settings.GEMINI_API_KEY,
+        settings.GROQ_API_KEY,
+        settings.POSTGRES_PASSWORD,
+    ):
+        if secret and len(secret) >= 4:
+            sanitized = sanitize_secret(sanitized, secret)
+    sanitized = BEARER_PATTERN.sub("Bearer [REDACTED]", sanitized)
+    return sanitized
 
 
 def get_llm_gateway() -> LLMGateway:
@@ -109,10 +127,11 @@ async def planner(
             system_instruction=SYSTEM_SECURITY_INSTRUCTION,
         )
         return {"plan": plan, "current_step": 2, "error": None}
-    except (LLMException, Exception) as err:
-        logger.error("Node [planner] structured plan generation failed: %s", err)
+    except Exception as err:
+        clean_err = sanitize_error_message(err)
+        logger.error("Node [planner] structured plan generation failed: %s", clean_err)
         return {
-            "error": f"Planner failed: {err}",
+            "error": f"Planner failed: {clean_err}",
             "current_step": 2,
         }
 
@@ -177,10 +196,11 @@ async def coder(
             updates["approval"] = None
 
         return updates
-    except (LLMException, Exception) as err:
-        logger.error("Node [coder] code proposal generation failed: %s", err)
+    except Exception as err:
+        clean_err = sanitize_error_message(err)
+        logger.error("Node [coder] code proposal generation failed: %s", clean_err)
         return {
-            "error": f"Coder failed: {err}",
+            "error": f"Coder failed: {clean_err}",
             "current_step": 3,
         }
 
@@ -242,7 +262,7 @@ async def debugger(
 ) -> dict[str, Any]:
     """Diagnoses test failures using LLMGateway without fabricating failure context."""
     test_res = state.get("test_result")
-    if not test_res or test_res.get("success") is True:
+    if not isinstance(test_res, dict) or test_res.get("success") is not False:
         logger.error("Node [debugger] invoked without genuine failed test result.")
         return {
             "error": "Debugger invoked without a failed test result.",
@@ -285,10 +305,11 @@ async def debugger(
             "current_step": 6,
             "error": None,
         }
-    except (LLMException, Exception) as err:
-        logger.error("Node [debugger] failure diagnosis failed: %s", err)
+    except Exception as err:
+        clean_err = sanitize_error_message(err)
+        logger.error("Node [debugger] failure diagnosis failed: %s", clean_err)
         return {
-            "error": f"Debugger failed: {err}",
+            "error": f"Debugger failed: {clean_err}",
             "repair_count": current_repairs,
             "current_step": 6,
         }
@@ -301,9 +322,13 @@ async def reviewer(
     logger.info("Node [reviewer] auditing implementation via LLMGateway.")
     gateway = _resolve_gateway(config)
 
-    test_res = state.get("test_result") or {}
-    test_passed = bool(test_res.get("success", False))
-    test_output = str(test_res.get("output") or "No test output available")
+    test_res = state.get("test_result")
+    test_passed = isinstance(test_res, dict) and test_res.get("success") is True
+    test_output = (
+        str(test_res.get("output") or "No test output available")
+        if isinstance(test_res, dict)
+        else "No test result available"
+    )
 
     coder_prop = state.get("coder_proposal")
     patch_text = coder_prop.patch if coder_prop else "No patch proposed"
@@ -329,6 +354,7 @@ async def reviewer(
             system_instruction=SYSTEM_SECURITY_INSTRUCTION,
         )
 
+        # Invariant Defense: Model cannot override authoritative test reality
         if not test_passed and review.verdict == "approved":
             logger.warning(
                 "Overriding invalid Reviewer verdict 'approved': authoritative tests did not pass."
@@ -350,10 +376,11 @@ async def reviewer(
             "current_step": 7,
             "error": None,
         }
-    except (LLMException, Exception) as err:
-        logger.error("Node [reviewer] review generation failed: %s", err)
+    except Exception as err:
+        clean_err = sanitize_error_message(err)
+        logger.error("Node [reviewer] review generation failed: %s", clean_err)
         return {
-            "error": f"Reviewer failed: {err}",
+            "error": f"Reviewer failed: {clean_err}",
             "current_step": 7,
         }
 
@@ -362,34 +389,58 @@ async def finalize(state: AgentState) -> dict[str, Any]:
     """Synthesizes workflow outcome into authoritative FinalizationResult."""
     logger.info("Node [finalize] concluding execution.")
 
-    test_res = state.get("test_result") or {}
-    test_passed = test_res.get("success", False)
+    test_res = state.get("test_result")
+    test_passed = isinstance(test_res, dict) and test_res.get("success") is True
     approval = state.get("approval")
     error = state.get("error")
+    review = state.get("review_summary")
 
+    # 1. Human operator rejection -> aborted
     if approval is False:
         status = "aborted"
         summary = (
             f"Workflow aborted by human operator: {state.get('feedback', 'Rejected')}"
         )
-    elif error:
+    # 2. Workflow error -> failed
+    elif error is not None:
         status = "failed"
         summary = f"Workflow halted due to error: {error}"
-    elif test_passed:
-        is_stub = test_res.get("is_stub", False)
+    # 3. Tests did not definitively pass -> failed
+    elif not test_passed:
+        status = "failed"
+        if test_res is None:
+            summary = "Task failed: test verification was never executed."
+        else:
+            summary = f"Task failed: tests did not pass (repair count: {state.get('repair_count', 0)})."
+    # 4. Reviewer verdict governance: must be approved to complete
+    elif review is None:
+        status = "failed"
+        summary = "Task failed: code review was not completed."
+    elif review.verdict == "rejected":
+        status = "failed"
+        summary = f"Task failed: reviewer rejected implementation: {review.summary}"
+    elif review.verdict == "changes_requested":
+        status = "failed"
+        summary = f"Task failed: reviewer requested changes: {review.summary}"
+    elif review.verdict == "approved" and approval is True:
         status = "completed"
+        is_stub = (
+            test_res.get("is_stub", False) if isinstance(test_res, dict) else False
+        )
         if is_stub:
             summary = "[STUB] Skeleton workflow completed with placeholder execution"
         else:
             summary = "Task completed successfully and all tests verified"
     else:
         status = "failed"
-        summary = f"Task failed after {state.get('repair_count', 0)} repair attempts."
+        summary = "Task failed: completion criteria not satisfied."
 
+    # Invariant: Only record tests that actually ran
     executed_tests: list[str] = []
     if state.get("test_command") and state.get("test_result") is not None:
         executed_tests.append(str(state["test_command"]))
 
+    # Invariant: Only record files that were actually modified, not merely proposed
     actual_files_changed: list[str] = []
     if state.get("applied_diff") and state.get("coder_proposal"):
         actual_files_changed = list(state["coder_proposal"].files_changed)
@@ -399,7 +450,7 @@ async def finalize(state: AgentState) -> dict[str, Any]:
         summary=summary,
         files_changed=actual_files_changed,
         tests=executed_tests,
-        review=state.get("review_summary"),
+        review=review,
     )
 
     return {

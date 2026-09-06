@@ -96,6 +96,18 @@ def validate_state_invariants(state: AgentState) -> None:
             f"exceeds MAX_REPAIR_ITERATIONS ({MAX_REPAIR_ITERATIONS})."
         )
 
+    err_val = state.get("error")
+    if err_val and isinstance(err_val, str):
+        from app.core.config import settings
+
+        for secret in (
+            settings.GEMINI_API_KEY,
+            settings.GROQ_API_KEY,
+            settings.POSTGRES_PASSWORD,
+        ):
+            if secret and len(secret) >= 4 and secret in err_val:
+                raise ValueError("Security violation: Secret leaked in error message.")
+
     # Invariant: No live network clients or API secrets stored directly in graph state
     for key, value in state.items():
         if "api_key" in key.lower() or "secret" in key.lower():
