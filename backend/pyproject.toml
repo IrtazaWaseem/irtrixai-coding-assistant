@@ -6,7 +6,6 @@ build-backend = "setuptools.build_meta"
 name = "irtrixai-backend"
 version = "0.1.0"
 description = "Secure Backend and Agent Engine for IrtrixAI Coding Assistant"
-readme = "../README.md"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115.0",
@@ -19,6 +18,8 @@ dependencies = [
     "httpx>=0.28.0",
     "docker>=7.1.0",
     "google-genai>=1.0.0",
+    "langgraph>=0.2.0",
+    "langgraph-checkpoint-postgres>=2.0.0",
 ]
 
 [project.optional-dependencies]
