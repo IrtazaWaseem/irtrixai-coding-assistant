@@ -1,7 +1,6 @@
 import logging
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -21,15 +20,12 @@ logger = logging.getLogger("irtrixai")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    """Application lifespan manager initializing and tearing down persistent infrastructure."""
+    """Application lifespan manager initializing and tearing down persistent infrastructure.
+
+    Fails closed: If PostgreSQL checkpointer fails, startup aborts immediately.
+    """
     logger.info("Application starting up: %s", settings.PROJECT_NAME)
-    try:
-        await checkpointer_manager.initialize()
-    except Exception as err:
-        logger.warning(
-            "PostgreSQL checkpointer initialization deferred/unavailable at startup: %s",
-            err,
-        )
+    await checkpointer_manager.initialize()
 
     yield
 
@@ -71,11 +67,8 @@ app.include_router(api_router, prefix=settings.API_V1_STR)
 
 
 @app.get("/health", tags=["system"])
-async def health_check() -> dict[str, Any]:
+async def health_check() -> dict[str, str]:
     return {
         "status": "ok",
         "service": "irtrixai-backend",
-        "project": settings.PROJECT_NAME,
-        "environment": settings.ENVIRONMENT,
-        "checkpointer_ready": checkpointer_manager.is_initialized,
     }

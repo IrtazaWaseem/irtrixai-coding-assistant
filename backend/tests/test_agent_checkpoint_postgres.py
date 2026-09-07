@@ -1,8 +1,9 @@
 import asyncio
+import logging
 import socket
 import sys
 import uuid
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -12,14 +13,19 @@ if sys.platform == "win32":
     except Exception:
         pass
 
+from langgraph.checkpoint.memory import MemorySaver
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.types import Command
 
-from app.agent.checkpoint import PostgresCheckpointerManager
-from app.agent.graph import build_agent_graph
+from app.agent.checkpoint import (
+    PostgresCheckpointerManager,
+    sanitize_postgres_error,
+)
+from app.agent.graph import build_agent_graph, get_production_graph
 from app.agent.nodes import set_llm_gateway
 from app.agent.state import create_initial_state
 from app.core.config import settings
+from app.main import lifespan
 from app.schemas.agent_contracts import (
     CoderOutput,
     DebuggerOutput,
@@ -40,10 +46,70 @@ def is_postgres_available() -> bool:
         return False
 
 
-pytestmark = pytest.mark.skipif(
-    not is_postgres_available(),
-    reason="PostgreSQL is not accessible on localhost:5432. Start database with 'docker compose up -d db'.",
-)
+# --- Unit Tests: Invariant, Sanitization & Fail-Closed Lifecycle (Run without PostgreSQL) ---
+
+
+def test_sanitize_postgres_error_redacts_credentials_and_uri():
+    """Verifies that database passwords and basic-auth URIs are redacted."""
+    raw_secret = settings.POSTGRES_PASSWORD
+    err_message = (
+        f"psycopg.OperationalError: connection to server at 'localhost', port 5432 failed: "
+        f"FATAL: password authentication failed for user 'irtrixai' with password '{raw_secret}' "
+        f"at postgresql://irtrixai:{raw_secret}@localhost:5432/irtrixai_db"
+    )
+    sanitized = sanitize_postgres_error(err_message)
+
+    assert raw_secret not in sanitized
+    assert "postgresql://irtrixai:[REDACTED]@localhost:5432/irtrixai_db" in sanitized
+
+
+@pytest.mark.asyncio
+async def test_postgres_initialize_sanitizes_thrown_error(caplog):
+    """Proves that PostgresCheckpointerManager never leaks secrets in raised exceptions or logs."""
+    fake_secret = "super_secret_pg_pwd_999"
+    fake_uri = f"postgresql://irtrixai:{fake_secret}@127.0.0.1:1/irtrixai_db"
+
+    manager = PostgresCheckpointerManager(fake_uri)
+    with patch("app.agent.checkpoint.settings.POSTGRES_PASSWORD", fake_secret):
+        with caplog.at_level(logging.ERROR):
+            with pytest.raises(RuntimeError) as exc_info:
+                await asyncio.wait_for(manager.initialize(), timeout=5.0)
+
+            err_str = str(exc_info.value)
+            assert fake_secret not in err_str
+            assert "[REDACTED]" in err_str or fake_secret not in err_str
+            assert fake_secret not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_lifespan_fails_closed_on_checkpointer_failure():
+    """Proves that FastAPI lifespan raises and aborts startup when PostgreSQL checkpointer fails."""
+    mock_app = MagicMock()
+    with patch(
+        "app.agent.checkpoint.checkpointer_manager.initialize",
+        side_effect=RuntimeError("Database connection refused"),
+    ):
+        with pytest.raises(RuntimeError, match="Database connection refused"):
+            async with lifespan(mock_app):
+                pass  # Must never reach inside context
+
+
+def test_build_agent_graph_default_uses_memory_saver():
+    """Verifies build_agent_graph() without explicit checkpointer uses MemorySaver for unit tests."""
+    graph = build_agent_graph()
+    assert isinstance(graph.checkpointer, MemorySaver)
+
+
+def test_get_production_graph_fails_closed_when_uninitialized():
+    """Verifies get_production_graph() raises RuntimeError when checkpointer manager is uninitialized."""
+    manager = PostgresCheckpointerManager()
+    assert not manager.is_initialized
+    with patch("app.agent.graph.checkpointer_manager", manager):
+        with pytest.raises(RuntimeError, match="not initialized"):
+            get_production_graph()
+
+
+# --- Integration Tests: Live PostgreSQL Persistence & Multi-Thread Isolation ---
 
 
 @pytest.fixture
@@ -90,6 +156,10 @@ def mock_gateway():
 @pytest.fixture
 async def postgres_saver():
     """Manages an isolated AsyncPostgresSaver connected to the live test database."""
+    if not is_postgres_available():
+        pytest.skip(
+            "PostgreSQL is not accessible on localhost:5432. Start database with 'docker compose up -d db'."
+        )
     manager = PostgresCheckpointerManager(settings.postgres_uri)
     saver = await manager.initialize()
     yield saver
@@ -217,19 +287,3 @@ async def test_postgres_multiple_threads_isolated(
 
     assert res_b.next == ("approval_gate",)
     assert res_b.values.get("final_result") is None
-
-
-@pytest.mark.asyncio
-async def test_postgres_unavailable_fails_closed_no_memory_fallback():
-    """Proves that initializing PostgresCheckpointerManager with invalid URI fails closed and never silently falls back to MemorySaver."""
-    invalid_uri = "postgresql://invalid_user:invalid_pwd@127.0.0.1:1/nonexistent_db"
-    manager = PostgresCheckpointerManager(invalid_uri)
-
-    with pytest.raises(
-        RuntimeError, match="PostgreSQL checkpointer initialization failed"
-    ):
-        await asyncio.wait_for(manager.initialize(), timeout=5.0)
-
-    assert not manager.is_initialized
-    with pytest.raises(RuntimeError, match="not initialized"):
-        manager.get_checkpointer()
