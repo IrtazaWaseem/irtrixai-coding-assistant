@@ -1,3 +1,5 @@
+import logging
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -5,53 +7,75 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from app.agent.checkpoint import checkpointer_manager
 from app.api.v1.api import api_router
 from app.core.config import settings
 from app.core.exceptions import AppException
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
+logger = logging.getLogger("irtrixai")
+
 
 @asynccontextmanager
-async def lifespan(_: FastAPI):
+async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+    """Application lifespan manager initializing and tearing down persistent infrastructure."""
+    logger.info("Application starting up: %s", settings.PROJECT_NAME)
+    try:
+        await checkpointer_manager.initialize()
+    except Exception as err:
+        logger.warning(
+            "PostgreSQL checkpointer initialization deferred/unavailable at startup: %s",
+            err,
+        )
+
     yield
+
+    logger.info("Application shutting down: closing checkpointer resources.")
+    await checkpointer_manager.close()
 
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
-    version="0.1.0",
     openapi_url=f"{settings.API_V1_STR}/openapi.json",
+    docs_url="/docs",
+    redoc_url="/redoc",
     lifespan=lifespan,
 )
 
-# CORS wired directly to settings without hardcoded origin duplicates
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[str(origin).rstrip("/") for origin in settings.BACKEND_CORS_ORIGINS],
-    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:[0-9]+)?$",
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+if settings.BACKEND_CORS_ORIGINS:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.BACKEND_CORS_ORIGINS,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 
 @app.exception_handler(AppException)
 async def app_exception_handler(request: Request, exc: AppException) -> JSONResponse:
+    """Handles domain AppExceptions by formatting consistent JSON responses."""
     return JSONResponse(
         status_code=exc.status_code,
         content={
-            "error": exc.__class__.__name__,
-            "message": exc.message,
+            "error": exc.message,
             "details": exc.details,
         },
     )
 
 
-@app.get("/health", tags=["System"])
+app.include_router(api_router, prefix=settings.API_V1_STR)
+
+
+@app.get("/health", tags=["system"])
 async def health_check() -> dict[str, Any]:
     return {
         "status": "ok",
         "service": "irtrixai-backend",
-        "version": "0.1.0",
+        "project": settings.PROJECT_NAME,
+        "environment": settings.ENVIRONMENT,
+        "checkpointer_ready": checkpointer_manager.is_initialized,
     }
-
-
-app.include_router(api_router, prefix=settings.API_V1_STR)

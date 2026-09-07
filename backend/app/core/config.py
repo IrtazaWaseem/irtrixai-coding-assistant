@@ -1,5 +1,6 @@
 from pathlib import Path
 from typing import TYPE_CHECKING
+from urllib.parse import quote_plus
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -75,6 +76,13 @@ class Settings(BaseSettings):
         case_sensitive=True,
         extra="ignore",
     )
+
+    @property
+    def postgres_uri(self) -> str:
+        """Returns standard PostgreSQL URI without dialect prefix for psycopg/checkpoint savers."""
+        user = quote_plus(self.POSTGRES_USER)
+        password = quote_plus(self.POSTGRES_PASSWORD)
+        return f"postgresql://{user}:{password}@{self.POSTGRES_SERVER}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
 
     def get_provider_default_model(self, provider: str) -> str:
         """Resolves the default model identifier for a given provider."""

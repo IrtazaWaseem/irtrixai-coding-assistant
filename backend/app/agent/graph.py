@@ -4,6 +4,7 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 
+from app.agent.checkpoint import checkpointer_manager
 from app.agent.nodes import (
     approval_gate,
     coder,
@@ -51,7 +52,10 @@ def route_after_test(
 def build_agent_graph(
     checkpointer: BaseCheckpointSaver | None = None,
 ) -> Any:
-    """Builds and compiles the IrtrixAI LangGraph workflow."""
+    """Builds and compiles the IrtrixAI LangGraph workflow.
+
+    Defaults to in-memory checkpointer for fast local testing when none is explicitly provided.
+    """
     workflow = StateGraph(AgentState)
 
     # 1. Register all 8 nodes
@@ -98,3 +102,12 @@ def build_agent_graph(
 
     saver = checkpointer if checkpointer is not None else MemorySaver()
     return workflow.compile(checkpointer=saver)
+
+
+def get_production_graph() -> Any:
+    """Constructs the authoritative agent graph bound to the production PostgreSQL checkpointer.
+
+    Fails closed: raises RuntimeError if PostgreSQL checkpointer is uninitialized.
+    """
+    checkpointer = checkpointer_manager.get_checkpointer()
+    return build_agent_graph(checkpointer=checkpointer)
