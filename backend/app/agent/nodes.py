@@ -15,6 +15,7 @@ from app.schemas.agent_contracts import (
     PlannerOutput,
     ReviewerOutput,
 )
+from app.services.execution_service import ExecutionService
 from app.services.llm.base import sanitize_secret
 from app.services.llm.gateway import LLMGateway
 from app.tools.file_tools import apply_patch, list_files, read_file
@@ -42,6 +43,7 @@ SYSTEM_SECURITY_INSTRUCTION = (
 BEARER_PATTERN = re.compile(r"Bearer\s+([A-Za-z0-9_\-\.]+)", re.IGNORECASE)
 
 _llm_gateway: LLMGateway | None = None
+_execution_service: ExecutionService | None = None
 
 
 def sanitize_error_message(err: Exception | str) -> str:
@@ -81,6 +83,32 @@ def _resolve_gateway(config: RunnableConfig | None) -> LLMGateway:
     return get_llm_gateway()
 
 
+def get_execution_service() -> ExecutionService:
+    """Returns the default or active ExecutionService instance."""
+    global _execution_service
+    if _execution_service is None:
+        _execution_service = ExecutionService()
+    return _execution_service
+
+
+def set_execution_service(service: ExecutionService | None) -> None:
+    """Configures the ExecutionService instance (used for testing and dependency injection)."""
+    global _execution_service
+    _execution_service = service
+
+
+def _resolve_execution_service(config: RunnableConfig | None) -> ExecutionService:
+    """Resolves execution service from RunnableConfig or falls back to singleton."""
+    if config and isinstance(config, dict):
+        configurable = config.get("configurable", {})
+        if (
+            "execution_service" in configurable
+            and configurable["execution_service"] is not None
+        ):
+            return configurable["execution_service"]
+    return get_execution_service()
+
+
 def _extract_user_prompt(state: AgentState) -> str:
     """Extracts latest user prompt from state messages."""
     for msg in reversed(state.get("messages", [])):
@@ -104,7 +132,7 @@ def detect_tech_stack(files: list[str]) -> list[str]:
             detected.add("python")
         if f_lower.endswith((".ts", ".tsx")) or base_name == "tsconfig.json":
             detected.add("typescript")
-        if f_lower.endswith((".js", ".jsx")) or base_name == "package.json":
+        if f_lower.endswith(".js") or base_name == "package.json":
             detected.add("javascript")
         if f_lower.endswith(".rs") or base_name == "cargo.toml":
             detected.add("rust")
@@ -458,16 +486,16 @@ async def coder(
             response_schema=CoderOutput,
             system_instruction=SYSTEM_SECURITY_INSTRUCTION,
         )
-        updates: dict[str, Any] = {
+        # INVARIANT: Every new proposal invalidates approval, applied_diff, and previous test_result
+        return {
             "coder_proposal": proposal,
             "pending_patch": proposal.patch,
+            "approval": None,
+            "applied_diff": None,
+            "test_result": None,
             "current_step": 3,
             "error": None,
         }
-        if state.get("approval") is False:
-            updates["approval"] = None
-
-        return updates
     except Exception as err:
         clean_err = sanitize_error_message(err)
         logger.error("Node [coder] code proposal generation failed: %s", clean_err)
@@ -509,22 +537,157 @@ async def approval_gate(state: AgentState) -> dict[str, Any]:
     }
 
 
-async def test_runner(state: AgentState) -> dict[str, Any]:
-    """Runs verification tests against proposed changes inside the secure sandbox."""
+async def test_runner(
+    state: AgentState, config: RunnableConfig | None = None
+) -> dict[str, Any]:
+    """Runs verification tests against proposed changes inside the secure Docker ExecutionService."""
     logger.info("Node [test_runner] executing test verification.")
     existing_result = state.get("test_result")
-    if existing_result is not None:
+    workspace_path = state.get("workspace_path", "")
+    test_command = state.get("test_command") or "pytest"
+
+    # Respect pre-populated non-stub results in unit tests when no patch was applied
+    if (
+        existing_result is not None
+        and isinstance(existing_result, dict)
+        and existing_result.get("is_stub") is False
+        and state.get("applied_diff") is None
+    ):
         return {"test_result": existing_result, "current_step": 5}
 
-    default_result = {
-        "success": True,
-        "exit_code": 0,
-        "output": "[STUB] Skeleton test execution placeholder - unverified",
-        "is_stub": True,
-    }
+    ws_obj = Path(workspace_path)
+    configurable = (
+        config.get("configurable", {}) if config and isinstance(config, dict) else {}
+    )
+    has_custom_service = (
+        configurable.get("execution_service") is not None
+        or _execution_service is not None
+    )
+
+    # Fail closed when the workspace is unavailable and no injected execution service exists.
+    if not ws_obj.is_dir() and not has_custom_service:
+        logger.error(
+            "Node [test_runner] workspace '%s' does not exist and no execution service is available.",
+            workspace_path,
+        )
+        return {
+            "test_command": test_command,
+            "test_result": {
+                "success": False,
+                "exit_code": None,
+                "stdout": "",
+                "stderr": "Execution failed: workspace does not exist.",
+                "output": "Execution failed: workspace does not exist.",
+                "command": str(test_command),
+                "is_stub": False,
+            },
+            "current_step": 5,
+        }
+
+    exec_service = _resolve_execution_service(config)
+
+    try:
+        raw_res = exec_service.execute(
+            command=test_command, workspace_path=workspace_path
+        )
+
+        # Robust metric extraction supporting ToolResult attributes, metadata dictionaries, and direct attributes
+        metadata = (
+            getattr(raw_res, "metadata", {})
+            if not isinstance(raw_res, dict)
+            else raw_res.get("metadata", {})
+        )
+        if not isinstance(metadata, dict):
+            metadata = {}
+
+        exit_code = metadata.get("exit_code")
+        if exit_code is None:
+            exit_code = getattr(raw_res, "exit_code", None)
+        if exit_code is None and isinstance(raw_res, dict):
+            exit_code = raw_res.get("exit_code")
+
+        stdout = metadata.get("stdout")
+        if not stdout:
+            stdout = (
+                getattr(raw_res, "stdout", "") or getattr(raw_res, "output", "") or ""
+            )
+        if not stdout and isinstance(raw_res, dict):
+            stdout = raw_res.get("stdout", "") or raw_res.get("output", "") or ""
+
+        stderr = metadata.get("stderr")
+        if not stderr:
+            stderr = (
+                getattr(raw_res, "stderr", "") or getattr(raw_res, "error", "") or ""
+            )
+        if not stderr and isinstance(raw_res, dict):
+            stderr = raw_res.get("stderr", "") or raw_res.get("error", "") or ""
+
+        if hasattr(raw_res, "success") and isinstance(
+            getattr(raw_res, "success"), bool
+        ):
+            success = bool(getattr(raw_res, "success"))
+        elif exit_code is not None:
+            success = exit_code == 0
+        elif isinstance(raw_res, dict) and "success" in raw_res:
+            success = bool(raw_res["success"])
+        else:
+            success = False
+
+        trunc_stdout = truncate_output(
+            str(stdout), max_bytes=settings.MAX_TOOL_OUTPUT_BYTES
+        )
+        bounded_stdout = (
+            trunc_stdout[0]
+            if isinstance(trunc_stdout, (tuple, list))
+            else str(trunc_stdout)
+        )
+
+        trunc_stderr = truncate_output(
+            str(stderr), max_bytes=settings.MAX_TOOL_OUTPUT_BYTES
+        )
+        bounded_stderr = (
+            trunc_stderr[0]
+            if isinstance(trunc_stderr, (tuple, list))
+            else str(trunc_stderr)
+        )
+
+        combined = (
+            f"{bounded_stdout}\n{bounded_stderr}".strip()
+            if bounded_stderr
+            else bounded_stdout
+        )
+        trunc_comb = truncate_output(combined, max_bytes=settings.MAX_TOOL_OUTPUT_BYTES)
+        bounded_output = (
+            trunc_comb[0] if isinstance(trunc_comb, (tuple, list)) else str(trunc_comb)
+        )
+
+        test_result = {
+            "success": success,
+            "exit_code": exit_code,
+            "stdout": bounded_stdout,
+            "stderr": bounded_stderr,
+            "output": bounded_output,
+            "command": str(test_command),
+            "is_stub": False,
+        }
+    except Exception as err:
+        clean_err = sanitize_error_message(err)
+        logger.error(
+            "Node [test_runner] ExecutionService failed with error: %s", clean_err
+        )
+        test_result = {
+            "success": False,
+            "exit_code": None,
+            "stdout": "",
+            "stderr": clean_err,
+            "output": f"Execution error: {clean_err}",
+            "command": str(test_command),
+            "is_stub": False,
+        }
+
     return {
-        "test_command": state.get("test_command") or "pytest",
-        "test_result": default_result,
+        "test_command": test_command,
+        "test_result": test_result,
         "current_step": 5,
     }
 
@@ -541,6 +704,7 @@ async def debugger(
             "current_step": 6,
         }
 
+    # REPAIR GOVERNANCE: Increment repair count deterministically inside graph logic
     current_repairs = state.get("repair_count", 0) + 1
     if current_repairs > MAX_REPAIR_ITERATIONS:
         logger.warning(
@@ -723,26 +887,13 @@ async def finalize(state: AgentState) -> dict[str, Any]:
 
 
 async def apply_approved_patch(state: AgentState) -> dict[str, Any]:
-    """Authoritatively applies an approved pending patch to the workspace filesystem.
-
-    STRICT INVARIANTS:
-    1. Only executes if state["approval"] is strictly True.
-    2. Rejection or absence of approval aborts without modifying disk.
-    3. ALL target files must be validated against path traversal, absolute paths,
-       symlink escapes, and protected files BEFORE ANY mutation begins.
-    4. If ANY target is invalid, the ENTIRE patch is rejected with ZERO mutation.
-    5. Duplicate file targets in a patch are rejected to avoid ambiguous state.
-    6. Multi-file application is atomic: if any file fails to apply, all previously
-       modified files are restored to their original contents.
-    7. Records the authoritative applied git diff upon success.
-    """
+    """Authoritatively applies an approved pending patch to the workspace filesystem."""
     approval = state.get("approval")
     pending_patch = state.get("pending_patch")
     workspace_path = state.get("workspace_path", "")
 
     logger.info("Node [apply_approved_patch] invoked (approval=%s)", approval)
 
-    # Invariant 1: Explicit approval required
     if approval is not True:
         logger.warning(
             "Node [apply_approved_patch] invoked without approval=True; aborting mutation."
@@ -753,7 +904,6 @@ async def apply_approved_patch(state: AgentState) -> dict[str, Any]:
             "current_step": 4,
         }
 
-    # Invariant 2: Empty or absent patch is a no-op
     if not pending_patch or not pending_patch.strip():
         logger.info("Node [apply_approved_patch] no pending patch to apply.")
         return {
@@ -762,7 +912,6 @@ async def apply_approved_patch(state: AgentState) -> dict[str, Any]:
         }
 
     ws_obj = Path(workspace_path)
-    # Unit-test safe guard: If workspace path is a dummy test string that does not exist on disk
     if not ws_obj.is_dir():
         logger.warning(
             "Node [apply_approved_patch] workspace '%s' does not exist on disk; skipping filesystem mutation.",
@@ -776,7 +925,6 @@ async def apply_approved_patch(state: AgentState) -> dict[str, Any]:
     resolved_ws = ws_obj.resolve()
     settings.WORKSPACE_BASE_PATH = resolved_ws
 
-    # Step 1: Parse all target files and chunks
     chunks = split_unified_diff(pending_patch)
     if not chunks:
         coder_prop = state.get("coder_proposal")
@@ -803,7 +951,6 @@ async def apply_approved_patch(state: AgentState) -> dict[str, Any]:
             "current_step": 4,
         }
 
-    # Step 2: Check for duplicate target files
     seen_targets: set[str] = set()
     for target, _ in chunks:
         norm_target = target.replace("\\", "/").strip().lower()
@@ -824,14 +971,13 @@ async def apply_approved_patch(state: AgentState) -> dict[str, Any]:
             }
         seen_targets.add(norm_target)
 
-    # Step 3: Check coder proposal files_changed if present for consistency
     coder_prop = state.get("coder_proposal")
     all_targets_to_validate: set[str] = {target for target, _ in chunks}
     if coder_prop and coder_prop.files_changed:
         for f in coder_prop.files_changed:
             all_targets_to_validate.add(f)
 
-    # Step 4: VALIDATION ATOMICITY - Validate EVERY target before ANY file is modified
+    # Validation Atomicity
     for target in all_targets_to_validate:
         if not target or target == "/dev/null":
             return {
@@ -846,7 +992,6 @@ async def apply_approved_patch(state: AgentState) -> dict[str, Any]:
                 "current_step": 4,
             }
 
-        # Absolute path rejection
         p_obj = Path(target)
         if p_obj.is_absolute():
             return {
@@ -860,7 +1005,6 @@ async def apply_approved_patch(state: AgentState) -> dict[str, Any]:
                 "current_step": 4,
             }
 
-        # Protected file check
         if is_protected_file(target):
             logger.error(
                 "Node [apply_approved_patch] target '%s' is a protected file.", target
@@ -876,7 +1020,6 @@ async def apply_approved_patch(state: AgentState) -> dict[str, Any]:
                 "current_step": 4,
             }
 
-        # Safe path boundary check (traversal, symlink escapes)
         try:
             validate_safe_path(resolved_ws, target)
         except Exception as path_err:
@@ -897,7 +1040,6 @@ async def apply_approved_patch(state: AgentState) -> dict[str, Any]:
                 "current_step": 4,
             }
 
-    # Step 5: APPLICATION ATOMICITY - Back up original content of all target files before mutation
     original_contents: dict[str, str | None] = {}
     for target, _ in chunks:
         target_path = (resolved_ws / target).resolve()
@@ -911,7 +1053,6 @@ async def apply_approved_patch(state: AgentState) -> dict[str, Any]:
     patch_failed = False
     failure_err = ""
 
-    # Step 6: Apply each chunk authoritatively via existing apply_patch tool
     for target, chunk_content in chunks:
         patch_res = apply_patch(target, chunk_content)
         last_tool_dict = patch_res.model_dump()
@@ -923,21 +1064,20 @@ async def apply_approved_patch(state: AgentState) -> dict[str, Any]:
             break
         applied_targets.append(target)
 
-    # Step 7: Rollback if any chunk failed
     if patch_failed:
+        rollback_targets = list(dict.fromkeys([*applied_targets, target]))
         logger.warning(
-            "Multi-file patch failed on target '%s'. Rolling back %d applied files.",
+            "Multi-file patch failed on target '%s'. Rolling back %d file(s).",
             target,
-            len(applied_targets),
+            len(rollback_targets),
         )
-        for applied in applied_targets:
+        for applied in rollback_targets:
             applied_path = (resolved_ws / applied).resolve()
             orig = original_contents.get(applied)
             if orig is not None:
                 applied_path.write_text(orig, encoding="utf-8")
-            else:
-                if applied_path.exists():
-                    applied_path.unlink()
+            elif applied_path.exists():
+                applied_path.unlink()
 
         clean_err = sanitize_error_message(failure_err)
         return {
@@ -947,7 +1087,6 @@ async def apply_approved_patch(state: AgentState) -> dict[str, Any]:
             "current_step": 4,
         }
 
-    # Step 8: Obtain authoritative applied git diff
     diff_text = ""
     try:
         diff_res = get_diff()
@@ -968,6 +1107,7 @@ async def apply_approved_patch(state: AgentState) -> dict[str, Any]:
     return {
         "applied_diff": final_diff,
         "tool_result": last_tool_dict,
+        "test_result": None,
         "error": None,
         "current_step": 4,
     }
