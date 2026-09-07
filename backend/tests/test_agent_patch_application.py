@@ -289,7 +289,16 @@ async def test_checkpoint_resume_then_apply_patch_lifecycle(tmp_path: Path):
     set_llm_gateway(mock_gw)
 
     thread_id = "th-chk-patch-apply"
-    config = {"configurable": {"thread_id": thread_id}}
+    execution_service = MagicMock()
+    execution_service.execute_in_sandbox.return_value = {
+        "command": "pytest",
+        "exit_code": 0,
+        "stdout": "1 passed\n",
+        "stderr": "",
+        "truncated": False,
+        "duration_seconds": 0.01,
+    }
+    config = {"configurable": {"thread_id": thread_id, "execution_service": execution_service}}
     shared_saver = MemorySaver()
 
     # 1. Graph instance A halts at approval_gate

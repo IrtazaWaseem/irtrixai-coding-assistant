@@ -172,7 +172,16 @@ async def test_postgres_checkpoint_persistence_across_graph_instances(
 ):
     """Proves that a paused HITL workflow checkpointed in PostgreSQL survives graph destruction and resumes in a NEW graph instance."""
     thread_id = f"thread-pg-test-{uuid.uuid4().hex[:8]}"
-    config = {"configurable": {"thread_id": thread_id}}
+    execution_service = MagicMock()
+    execution_service.execute_in_sandbox.return_value = {
+        "command": "pytest",
+        "exit_code": 0,
+        "stdout": "1 passed\n",
+        "stderr": "",
+        "truncated": False,
+        "duration_seconds": 0.01,
+    }
+    config = {"configurable": {"thread_id": thread_id, "execution_service": execution_service}}
 
     # 1. Execute Graph Instance 1 until interrupt
     graph_v1 = build_agent_graph(checkpointer=postgres_saver)

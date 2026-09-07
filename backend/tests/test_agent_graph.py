@@ -32,6 +32,19 @@ from app.schemas.agent_contracts import (
 from app.services.llm.gateway import LLMGateway
 
 
+def make_success_execution_service():
+    service = MagicMock()
+    service.execute_in_sandbox.return_value = {
+        "command": "pytest",
+        "exit_code": 0,
+        "stdout": "1 passed\n",
+        "stderr": "",
+        "truncated": False,
+        "duration_seconds": 0.01,
+    }
+    return service
+
+
 @pytest.fixture(autouse=True)
 def mock_gateway_fixture():
     """Provides an isolated in-memory mock LLMGateway for all graph unit tests."""
@@ -196,7 +209,7 @@ async def test_in_memory_graph_happy_path_preapproved(mock_gateway_fixture):
         "is_stub": False,
     }
 
-    config = {"configurable": {"thread_id": "thread-test-run-1"}}
+    config = {"configurable": {"thread_id": "thread-test-run-1", "execution_service": make_success_execution_service()}}
     final_state = await graph.ainvoke(initial, config=config)
 
     assert final_state["thread_id"] == "thread-test-run-1"
@@ -208,28 +221,27 @@ async def test_in_memory_graph_happy_path_preapproved(mock_gateway_fixture):
 
 
 @pytest.mark.asyncio
-async def test_in_memory_graph_default_stub_test_runner_fails_finalization(
+async def test_in_memory_graph_execution_unavailable_does_not_complete(
     mock_gateway_fixture,
 ):
-    """Verifies end-to-end graph using default test_runner stub produces failed finalization."""
+    """Verifies unavailable sandbox execution cannot produce a completed task."""
     graph = build_agent_graph()
     initial = create_initial_state(
-        task_id="task-stub-1",
+        task_id="task-no-exec-1",
         workspace_path="/mock/workspace",
-        thread_id="thread-stub-test-1",
+        thread_id="thread-no-exec-1",
         prompt="Implement calculator",
     )
     initial["approval"] = True
 
-    config = {"configurable": {"thread_id": "thread-stub-test-1"}}
+    config = {"configurable": {"thread_id": "thread-no-exec-1"}}
     final_state = await graph.ainvoke(initial, config=config)
 
-    assert final_state["final_result"].status == "failed"
-    assert final_state["final_result"].status != "completed"
-    assert (
-        "stub" in final_state["final_result"].summary.lower()
-        or "placeholder" in final_state["final_result"].summary.lower()
-    )
+    snapshot = graph.get_state(config)
+    assert snapshot.next == ("approval_gate",)
+    assert snapshot.values["test_result"]["execution_unavailable"] is True
+    assert final_state.get("final_result") is None
+    assert final_state["test_result"]["success"] is False
 
 
 @pytest.mark.asyncio
@@ -267,7 +279,7 @@ async def test_hitl_resume_with_approval(mock_gateway_fixture):
     """Resuming an interrupted thread with approval=True and verified test results completes workflow."""
     graph = build_agent_graph()
     thread_id = "thread-hitl-resume-approved"
-    config = {"configurable": {"thread_id": thread_id}}
+    config = {"configurable": {"thread_id": thread_id, "execution_service": make_success_execution_service()}}
 
     initial = create_initial_state(
         task_id="task-hitl-2",
@@ -750,7 +762,7 @@ async def test_finalize_missing_test_result_not_completed():
     res = await finalize(state)
     assert res["final_result"].status == "failed"
     assert res["final_result"].status != "completed"
-    assert "never executed" in res["final_result"].summary.lower()
+    assert "authoritative test verification" in res["final_result"].summary.lower()
 
 
 @pytest.mark.asyncio
