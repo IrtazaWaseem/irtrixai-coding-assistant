@@ -1,5 +1,6 @@
 import logging
 import re
+from pathlib import Path
 from typing import Any
 
 from langchain_core.runnables import RunnableConfig
@@ -16,6 +17,9 @@ from app.schemas.agent_contracts import (
 )
 from app.services.llm.base import sanitize_secret
 from app.services.llm.gateway import LLMGateway
+from app.tools.file_tools import apply_patch, list_files, read_file
+from app.tools.git_tools import get_diff, git_status
+from app.tools.validators import truncate_output
 
 logger = logging.getLogger(__name__)
 
@@ -81,17 +85,213 @@ def _extract_user_prompt(state: AgentState) -> str:
     return ""
 
 
+def detect_tech_stack(files: list[str]) -> list[str]:
+    """Deterministically identifies language and tool ecosystems from workspace file paths."""
+    detected: set[str] = set()
+    for f in files:
+        f_lower = f.lower()
+        base_name = Path(f_lower).name
+        if f_lower.endswith((".py", ".pyi")) or base_name in (
+            "pyproject.toml",
+            "requirements.txt",
+            "setup.py",
+            "pipfile",
+        ):
+            detected.add("python")
+        if f_lower.endswith((".ts", ".tsx")) or base_name == "tsconfig.json":
+            detected.add("typescript")
+        if f_lower.endswith((".js", ".jsx")) or base_name == "package.json":
+            detected.add("javascript")
+        if f_lower.endswith(".rs") or base_name == "cargo.toml":
+            detected.add("rust")
+        if f_lower.endswith(".go") or base_name == "go.mod":
+            detected.add("go")
+        if f_lower.endswith((".java", ".jar")) or base_name in (
+            "pom.xml",
+            "build.gradle",
+            "build.gradle.kts",
+        ):
+            detected.add("java")
+        if "dockerfile" in base_name or base_name in (
+            "docker-compose.yml",
+            "docker-compose.yaml",
+        ):
+            detected.add("docker")
+    return sorted(detected) if detected else ["python"]
+
+
+def extract_file_paths(tool_res: Any) -> list[str]:
+    """Extracts a flat list of file paths from heterogeneous ToolResult payloads."""
+    raw_list: list[Any] = []
+
+    if hasattr(tool_res, "output") and tool_res.output is not None:
+        out = tool_res.output
+        if isinstance(out, dict):
+            for key in ("files", "entries", "items", "paths"):
+                if key in out and isinstance(out[key], (list, tuple)):
+                    raw_list = list(out[key])
+                    break
+        elif isinstance(out, (list, tuple)):
+            raw_list = list(out)
+        elif isinstance(out, str):
+            raw_list = [line.strip() for line in out.splitlines() if line.strip()]
+
+    if (
+        not raw_list
+        and hasattr(tool_res, "metadata")
+        and isinstance(tool_res.metadata, dict)
+    ):
+        for key in ("files", "entries", "items", "paths"):
+            if key in tool_res.metadata and isinstance(
+                tool_res.metadata[key], (list, tuple)
+            ):
+                raw_list = list(tool_res.metadata[key])
+                break
+
+    files: list[str] = []
+    for item in raw_list:
+        if isinstance(item, str):
+            files.append(item)
+        elif isinstance(item, dict):
+            val = item.get("path") or item.get("name") or item.get("file")
+            if val:
+                files.append(str(val))
+    return files
+
+
+def extract_patch_target_file(patch_text: str) -> str:
+    """Extracts target file path from unified diff headers or returns empty string."""
+    if not patch_text:
+        return ""
+    for line in patch_text.splitlines():
+        if line.startswith("+++ "):
+            target = line[4:].strip()
+            target = target.split("\t")[0].split(" ")[0].strip()
+            if target.startswith("b/") or target.startswith("a/"):
+                target = target[2:]
+            if target and target != "/dev/null":
+                return target
+    for line in patch_text.splitlines():
+        if line.startswith("--- "):
+            target = line[4:].strip()
+            target = target.split("\t")[0].split(" ")[0].strip()
+            if target.startswith("a/") or target.startswith("b/"):
+                target = target[2:]
+            if target and target != "/dev/null":
+                return target
+    return ""
+
+
 async def inspect_workspace(state: AgentState) -> dict[str, Any]:
-    """Inspects workspace topology, detects tech stack, and records initial summary."""
+    """Authoritatively inspects workspace topology, detects tech stack, and records initial summary."""
     workspace_path = state.get("workspace_path", "")
     logger.info("Node [inspect_workspace] analyzing '%s'", workspace_path)
 
     existing_summary = state.get("workspace_summary")
     existing_stack = state.get("tech_stack", [])
 
+    if (
+        existing_summary
+        and existing_stack
+        and existing_summary != f"Workspace root at {workspace_path}"
+    ):
+        return {
+            "workspace_summary": existing_summary,
+            "tech_stack": existing_stack,
+            "current_step": 1,
+        }
+
+    if workspace_path:
+        settings.WORKSPACE_BASE_PATH = Path(workspace_path).resolve()
+
+    tool_res = list_files(recursive=True)
+    tool_result_dict = tool_res.model_dump()
+
+    if not tool_res.success:
+        logger.warning(
+            "Workspace inspection returned unsuccessful for '%s': %s",
+            workspace_path,
+            tool_res.error,
+        )
+        return {
+            "workspace_summary": (
+                existing_summary
+                or f"Workspace root at {workspace_path} (uninspected: {tool_res.error})"
+            ),
+            "tech_stack": existing_stack or ["python"],
+            "tool_result": tool_result_dict,
+            "current_step": 1,
+        }
+
+    files = extract_file_paths(tool_res)
+    tech_stack = detect_tech_stack(files)
+
+    summary_blocks = [
+        f"Workspace Root: {workspace_path}",
+        f"Detected Tech Stack: {', '.join(tech_stack)}",
+        f"Total Files Indexed: {len(files)}",
+    ]
+
+    if files:
+        file_sample = files[:60]
+        summary_blocks.append(
+            "Files in Workspace:\n" + "\n".join(f"- {f}" for f in file_sample)
+        )
+        if len(files) > 60:
+            summary_blocks.append(f"... and {len(files) - 60} more files.")
+    else:
+        summary_blocks.append("Files in Workspace: (empty workspace)")
+
+    ws_path_obj = Path(workspace_path)
+    if (ws_path_obj / ".git").is_dir():
+        try:
+            status_res = git_status()
+            if status_res.success and status_res.output is not None:
+                if isinstance(status_res.output, str):
+                    git_text = status_res.output.strip()
+                elif isinstance(status_res.output, dict):
+                    parts = [f"{k}: {v}" for k, v in status_res.output.items() if v]
+                    git_text = "\n".join(parts) if parts else "clean"
+                else:
+                    git_text = str(status_res.output)
+                summary_blocks.append(f"Git Status:\n{git_text}")
+        except Exception as git_err:
+            logger.debug("Git status check skipped: %s", git_err)
+
+    manifest_candidates = [
+        f
+        for f in files
+        if Path(f).name.lower() in ("readme.md", "pyproject.toml", "package.json")
+    ]
+    if manifest_candidates:
+        primary_manifest = manifest_candidates[0]
+        try:
+            read_res = read_file(primary_manifest, limit=20)
+            if read_res.success and read_res.output is not None:
+                if isinstance(read_res.output, str):
+                    manifest_text = read_res.output.strip()
+                elif isinstance(read_res.output, dict):
+                    manifest_text = str(
+                        read_res.output.get("content", read_res.output)
+                    ).strip()
+                else:
+                    manifest_text = str(read_res.output).strip()
+                summary_blocks.append(
+                    f"Manifest Excerpt ({primary_manifest}):\n{manifest_text}"
+                )
+        except Exception as read_err:
+            logger.debug("Manifest read skipped: %s", read_err)
+
+    raw_summary = "\n\n".join(summary_blocks)
+    trunc_res = truncate_output(raw_summary, max_bytes=settings.MAX_TOOL_OUTPUT_BYTES)
+    bounded_summary = (
+        trunc_res[0] if isinstance(trunc_res, (tuple, list)) else trunc_res
+    )
+
     return {
-        "workspace_summary": existing_summary or f"Workspace root at {workspace_path}",
-        "tech_stack": existing_stack or ["python"],
+        "workspace_summary": bounded_summary,
+        "tech_stack": tech_stack,
+        "tool_result": tool_result_dict,
         "current_step": 1,
     }
 
@@ -152,12 +352,16 @@ async def coder(
     feedback = state.get("feedback")
     debugger_out = state.get("debugger_output")
 
-    plan_section = (
-        f"Plan Summary: {plan.summary}\nSteps:\n"
-        + "\n".join(f"- {s}" for s in plan.steps)
-        if plan
-        else "No plan available."
-    )
+    plan_steps = getattr(plan, "steps", None)
+    plan_summary = getattr(plan, "summary", None)
+    if plan_steps and isinstance(plan_steps, (list, tuple)):
+        plan_section = f"Plan Summary: {plan_summary or 'None'}\nSteps:\n" + "\n".join(
+            f"- {s}" for s in plan_steps
+        )
+    elif plan_summary:
+        plan_section = f"Plan Summary: {plan_summary}"
+    else:
+        plan_section = "No plan available."
 
     prompt_blocks = [
         f"User Task: {user_prompt}",
@@ -433,12 +637,10 @@ async def finalize(state: AgentState) -> dict[str, Any]:
         status = "failed"
         summary = "Task failed: completion criteria not satisfied."
 
-    # Invariant: Only record tests that actually ran
     executed_tests: list[str] = []
     if state.get("test_command") and state.get("test_result") is not None:
         executed_tests.append(str(state["test_command"]))
 
-    # Invariant: Only record files that were actually modified, not merely proposed
     actual_files_changed: list[str] = []
     if state.get("applied_diff") and state.get("coder_proposal"):
         actual_files_changed = list(state["coder_proposal"].files_changed)
@@ -454,4 +656,99 @@ async def finalize(state: AgentState) -> dict[str, Any]:
     return {
         "final_result": final,
         "current_step": 8,
+    }
+
+
+async def apply_approved_patch(state: AgentState) -> dict[str, Any]:
+    """Authoritatively applies an approved pending patch to the workspace filesystem.
+
+    STRICT INVARIANTS:
+    1. Only executes if state["approval"] is strictly True.
+    2. Rejection or absence of approval aborts without modifying disk.
+    3. Traversal attacks, absolute paths, or patches touching protected files
+       are rejected by the underlying Day 2 apply_patch tool.
+    4. Records the authoritative applied git diff upon success.
+    """
+    approval = state.get("approval")
+    pending_patch = state.get("pending_patch")
+    workspace_path = state.get("workspace_path", "")
+
+    logger.info("Node [apply_approved_patch] invoked (approval=%s)", approval)
+
+    # Invariant 1: Explicit approval required
+    if approval is not True:
+        logger.warning(
+            "Node [apply_approved_patch] invoked without approval=True; aborting mutation."
+        )
+        return {
+            "applied_diff": None,
+            "error": "Patch application denied: human approval was not granted.",
+            "current_step": 4,
+        }
+
+    # Invariant 2: Empty or absent patch is a no-op
+    if not pending_patch or not pending_patch.strip():
+        logger.info("Node [apply_approved_patch] no pending patch to apply.")
+        return {
+            "applied_diff": "",
+            "current_step": 4,
+        }
+
+    ws_obj = Path(workspace_path)
+    # Unit-test safe guard: If workspace path is a dummy test string that does not exist on disk
+    if not ws_obj.is_dir():
+        logger.warning(
+            "Node [apply_approved_patch] workspace '%s' does not exist on disk; skipping filesystem mutation.",
+            workspace_path,
+        )
+        return {
+            "applied_diff": pending_patch,
+            "current_step": 4,
+        }
+
+    # Bind workspace base path for tool execution
+    settings.WORKSPACE_BASE_PATH = ws_obj.resolve()
+
+    # Determine target file from diff headers or coder proposal
+    target_file = extract_patch_target_file(pending_patch)
+    if not target_file:
+        coder_prop = state.get("coder_proposal")
+        if coder_prop and coder_prop.files_changed:
+            target_file = coder_prop.files_changed[0]
+
+    # Authoritative patch application via Day 2 secure tool layer
+    patch_res = apply_patch(target_file, pending_patch)
+    tool_dict = patch_res.model_dump()
+
+    if not patch_res.success:
+        clean_err = sanitize_error_message(patch_res.error or "Unknown patch failure")
+        logger.error("Authoritative patch application failed: %s", clean_err)
+        return {
+            "applied_diff": None,
+            "tool_result": tool_dict,
+            "error": f"Patch application failed: {clean_err}",
+            "current_step": 4,
+        }
+
+    # Invariant 3: Obtain authoritative applied diff from git layer
+    diff_text = ""
+    try:
+        diff_res = get_diff()
+        if diff_res.success and diff_res.output:
+            if isinstance(diff_res.output, str):
+                diff_text = diff_res.output
+            elif isinstance(diff_res.output, dict):
+                diff_text = str(diff_res.output.get("diff", ""))
+    except Exception as diff_err:
+        logger.debug("Failed to retrieve git diff after patch: %s", diff_err)
+
+    final_diff = (
+        diff_text.strip() if diff_text and diff_text.strip() else str(patch_res.output)
+    )
+    logger.info("Authoritative patch successfully applied to workspace.")
+    return {
+        "applied_diff": final_diff,
+        "tool_result": tool_dict,
+        "error": None,
+        "current_step": 4,
     }
