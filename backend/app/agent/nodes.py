@@ -19,7 +19,11 @@ from app.services.llm.base import sanitize_secret
 from app.services.llm.gateway import LLMGateway
 from app.tools.file_tools import apply_patch, list_files, read_file
 from app.tools.git_tools import get_diff, git_status
-from app.tools.validators import truncate_output
+from app.tools.validators import (
+    is_protected_file,
+    truncate_output,
+    validate_safe_path,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -159,27 +163,91 @@ def extract_file_paths(tool_res: Any) -> list[str]:
     return files
 
 
-def extract_patch_target_file(patch_text: str) -> str:
-    """Extracts target file path from unified diff headers or returns empty string."""
-    if not patch_text:
-        return ""
-    for line in patch_text.splitlines():
-        if line.startswith("+++ "):
-            target = line[4:].strip()
-            target = target.split("\t")[0].split(" ")[0].strip()
-            if target.startswith("b/") or target.startswith("a/"):
-                target = target[2:]
-            if target and target != "/dev/null":
-                return target
-    for line in patch_text.splitlines():
+def _clean_header_path(raw: str) -> str:
+    """Strips git prefixes, timestamps, and tab characters from unified diff file headers."""
+    p = raw.strip()
+    p = p.split("\t")[0].strip()
+    parts = p.split()
+    if len(parts) > 1 and ("-" in parts[1] or ":" in parts[1]):
+        p = parts[0]
+    if p.startswith("b/") or p.startswith("a/"):
+        p = p[2:]
+    return p
+
+
+def _extract_target_from_header(old_line: str, new_line: str) -> str:
+    """Resolves target file path from unified diff old (---) and new (+++) header lines."""
+    new_path = _clean_header_path(new_line[4:]) if new_line.startswith("+++ ") else ""
+    old_path = _clean_header_path(old_line[4:]) if old_line.startswith("--- ") else ""
+
+    if new_path and new_path != "/dev/null":
+        return new_path
+    if old_path and old_path != "/dev/null":
+        return old_path
+    return new_path or old_path
+
+
+def split_unified_diff(patch_text: str) -> list[tuple[str, str]]:
+    """Splits a multi-file unified diff into individual (target_file, single_file_diff) pairs."""
+    if not patch_text or not patch_text.strip():
+        return []
+
+    lines = patch_text.splitlines(keepends=True)
+    file_starts: list[tuple[int, str]] = []
+
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if line.startswith("diff --git "):
+            j = i + 1
+            old_line = ""
+            new_line = ""
+            while j < len(lines) and not lines[j].startswith("diff --git "):
+                if lines[j].startswith("--- "):
+                    old_line = lines[j]
+                elif lines[j].startswith("+++ "):
+                    new_line = lines[j]
+                    break
+                j += 1
+            target = _extract_target_from_header(old_line, new_line)
+            file_starts.append((i, target))
+            i = j + 1
+            continue
+
         if line.startswith("--- "):
-            target = line[4:].strip()
-            target = target.split("\t")[0].split(" ")[0].strip()
-            if target.startswith("a/") or target.startswith("b/"):
-                target = target[2:]
-            if target and target != "/dev/null":
-                return target
-    return ""
+            if i + 1 < len(lines) and lines[i + 1].startswith("+++ "):
+                target = _extract_target_from_header(line, lines[i + 1])
+                file_starts.append((i, target))
+                i += 2
+                continue
+        i += 1
+
+    if not file_starts:
+        return []
+
+    chunks: list[tuple[str, str]] = []
+    for idx, (start_line, target) in enumerate(file_starts):
+        end_line = file_starts[idx + 1][0] if idx + 1 < len(file_starts) else len(lines)
+        chunk_content = "".join(lines[start_line:end_line])
+        chunks.append((target, chunk_content))
+
+    return chunks
+
+
+def extract_all_patch_targets(patch_text: str) -> list[str]:
+    """Extracts all target file paths from unified diff headers in order of appearance."""
+    chunks = split_unified_diff(patch_text)
+    targets: list[str] = []
+    for target, _ in chunks:
+        if target and target not in targets:
+            targets.append(target)
+    return targets
+
+
+def extract_patch_target_file(patch_text: str) -> str:
+    """Extracts the first target file path from unified diff headers or returns empty string."""
+    targets = extract_all_patch_targets(patch_text)
+    return targets[0] if targets else ""
 
 
 async def inspect_workspace(state: AgentState) -> dict[str, Any]:
@@ -599,28 +667,23 @@ async def finalize(state: AgentState) -> dict[str, Any]:
     error = state.get("error")
     review = state.get("review_summary")
 
-    # 1. Human operator rejection -> aborted
     if approval is False:
         status = "aborted"
         summary = (
             f"Workflow aborted by human operator: {state.get('feedback', 'Rejected')}"
         )
-    # 2. Workflow error -> failed
     elif error is not None:
         status = "failed"
         summary = f"Workflow halted due to error: {error}"
-    # 3. Tests did not definitively pass -> failed
     elif not test_passed:
         status = "failed"
         if test_res is None:
             summary = "Task failed: test verification was never executed."
         else:
             summary = f"Task failed: tests did not pass (repair count: {state.get('repair_count', 0)})."
-    # 4. Stub/placeholder execution cannot produce completed status -> failed
     elif is_stub:
         status = "failed"
         summary = "Task failed: test verification was only a placeholder/stub."
-    # 5. Reviewer verdict governance: must be approved to complete
     elif review is None:
         status = "failed"
         summary = "Task failed: code review was not completed."
@@ -665,9 +728,13 @@ async def apply_approved_patch(state: AgentState) -> dict[str, Any]:
     STRICT INVARIANTS:
     1. Only executes if state["approval"] is strictly True.
     2. Rejection or absence of approval aborts without modifying disk.
-    3. Traversal attacks, absolute paths, or patches touching protected files
-       are rejected by the underlying Day 2 apply_patch tool.
-    4. Records the authoritative applied git diff upon success.
+    3. ALL target files must be validated against path traversal, absolute paths,
+       symlink escapes, and protected files BEFORE ANY mutation begins.
+    4. If ANY target is invalid, the ENTIRE patch is rejected with ZERO mutation.
+    5. Duplicate file targets in a patch are rejected to avoid ambiguous state.
+    6. Multi-file application is atomic: if any file fails to apply, all previously
+       modified files are restored to their original contents.
+    7. Records the authoritative applied git diff upon success.
     """
     approval = state.get("approval")
     pending_patch = state.get("pending_patch")
@@ -706,31 +773,181 @@ async def apply_approved_patch(state: AgentState) -> dict[str, Any]:
             "current_step": 4,
         }
 
-    # Bind workspace base path for tool execution
-    settings.WORKSPACE_BASE_PATH = ws_obj.resolve()
+    resolved_ws = ws_obj.resolve()
+    settings.WORKSPACE_BASE_PATH = resolved_ws
 
-    # Determine target file from diff headers or coder proposal
-    target_file = extract_patch_target_file(pending_patch)
-    if not target_file:
+    # Step 1: Parse all target files and chunks
+    chunks = split_unified_diff(pending_patch)
+    if not chunks:
         coder_prop = state.get("coder_proposal")
         if coder_prop and coder_prop.files_changed:
-            target_file = coder_prop.files_changed[0]
+            chunks = [(f, pending_patch) for f in coder_prop.files_changed]
+        else:
+            first_target = extract_patch_target_file(pending_patch)
+            if first_target:
+                chunks = [(first_target, pending_patch)]
 
-    # Authoritative patch application via Day 2 secure tool layer
-    patch_res = apply_patch(target_file, pending_patch)
-    tool_dict = patch_res.model_dump()
-
-    if not patch_res.success:
-        clean_err = sanitize_error_message(patch_res.error or "Unknown patch failure")
-        logger.error("Authoritative patch application failed: %s", clean_err)
+    if not chunks:
+        logger.error(
+            "Node [apply_approved_patch] unable to determine target file(s) from patch."
+        )
         return {
             "applied_diff": None,
-            "tool_result": tool_dict,
+            "tool_result": {
+                "success": False,
+                "error": "Unable to determine target file(s) from patch.",
+                "output": None,
+                "metadata": {},
+            },
+            "error": "Patch application failed: unable to determine target file(s) from patch.",
+            "current_step": 4,
+        }
+
+    # Step 2: Check for duplicate target files
+    seen_targets: set[str] = set()
+    for target, _ in chunks:
+        norm_target = target.replace("\\", "/").strip().lower()
+        if norm_target in seen_targets:
+            logger.error(
+                "Node [apply_approved_patch] duplicate target file rejected: %s", target
+            )
+            return {
+                "applied_diff": None,
+                "tool_result": {
+                    "success": False,
+                    "error": f"Duplicate target file '{target}' in patch.",
+                    "output": None,
+                    "metadata": {"duplicate_target": target},
+                },
+                "error": f"Patch application failed: duplicate target file '{target}' in patch.",
+                "current_step": 4,
+            }
+        seen_targets.add(norm_target)
+
+    # Step 3: Check coder proposal files_changed if present for consistency
+    coder_prop = state.get("coder_proposal")
+    all_targets_to_validate: set[str] = {target for target, _ in chunks}
+    if coder_prop and coder_prop.files_changed:
+        for f in coder_prop.files_changed:
+            all_targets_to_validate.add(f)
+
+    # Step 4: VALIDATION ATOMICITY - Validate EVERY target before ANY file is modified
+    for target in all_targets_to_validate:
+        if not target or target == "/dev/null":
+            return {
+                "applied_diff": None,
+                "tool_result": {
+                    "success": False,
+                    "error": "Invalid patch target file path.",
+                    "output": None,
+                    "metadata": {},
+                },
+                "error": "Patch application failed: invalid patch target file path.",
+                "current_step": 4,
+            }
+
+        # Absolute path rejection
+        p_obj = Path(target)
+        if p_obj.is_absolute():
+            return {
+                "applied_diff": None,
+                "tool_result": {
+                    "success": False,
+                    "error": f"Absolute path escape detected: '{target}'",
+                    "metadata": {"invalid_path": target},
+                },
+                "error": f"Patch application failed: Absolute path escape detected: '{target}'",
+                "current_step": 4,
+            }
+
+        # Protected file check
+        if is_protected_file(target):
+            logger.error(
+                "Node [apply_approved_patch] target '%s' is a protected file.", target
+            )
+            return {
+                "applied_diff": None,
+                "tool_result": {
+                    "success": False,
+                    "error": f"Access to protected file '{target}' is denied.",
+                    "metadata": {"protected_file": target},
+                },
+                "error": f"Patch application failed: Access to protected file '{target}' is denied.",
+                "current_step": 4,
+            }
+
+        # Safe path boundary check (traversal, symlink escapes)
+        try:
+            validate_safe_path(resolved_ws, target)
+        except Exception as path_err:
+            clean_err = sanitize_error_message(path_err)
+            logger.error(
+                "Node [apply_approved_patch] target '%s' failed path validation: %s",
+                target,
+                clean_err,
+            )
+            return {
+                "applied_diff": None,
+                "tool_result": {
+                    "success": False,
+                    "error": clean_err,
+                    "metadata": {"invalid_path": target},
+                },
+                "error": f"Patch application failed: {clean_err}",
+                "current_step": 4,
+            }
+
+    # Step 5: APPLICATION ATOMICITY - Back up original content of all target files before mutation
+    original_contents: dict[str, str | None] = {}
+    for target, _ in chunks:
+        target_path = (resolved_ws / target).resolve()
+        if target_path.is_file():
+            original_contents[target] = target_path.read_text(encoding="utf-8")
+        else:
+            original_contents[target] = None
+
+    applied_targets: list[str] = []
+    last_tool_dict: dict[str, Any] = {}
+    patch_failed = False
+    failure_err = ""
+
+    # Step 6: Apply each chunk authoritatively via existing apply_patch tool
+    for target, chunk_content in chunks:
+        patch_res = apply_patch(target, chunk_content)
+        last_tool_dict = patch_res.model_dump()
+
+        if not patch_res.success:
+            patch_failed = True
+            failure_err = patch_res.error or f"Failed to apply patch to {target}"
+            logger.error("Patch failed for target '%s': %s", target, failure_err)
+            break
+        applied_targets.append(target)
+
+    # Step 7: Rollback if any chunk failed
+    if patch_failed:
+        logger.warning(
+            "Multi-file patch failed on target '%s'. Rolling back %d applied files.",
+            target,
+            len(applied_targets),
+        )
+        for applied in applied_targets:
+            applied_path = (resolved_ws / applied).resolve()
+            orig = original_contents.get(applied)
+            if orig is not None:
+                applied_path.write_text(orig, encoding="utf-8")
+            else:
+                if applied_path.exists():
+                    applied_path.unlink()
+
+        clean_err = sanitize_error_message(failure_err)
+        return {
+            "applied_diff": None,
+            "tool_result": last_tool_dict,
             "error": f"Patch application failed: {clean_err}",
             "current_step": 4,
         }
 
-    # Invariant 3: Obtain authoritative applied diff from git layer
+    # Step 8: Obtain authoritative applied git diff
     diff_text = ""
     try:
         diff_res = get_diff()
@@ -743,12 +960,14 @@ async def apply_approved_patch(state: AgentState) -> dict[str, Any]:
         logger.debug("Failed to retrieve git diff after patch: %s", diff_err)
 
     final_diff = (
-        diff_text.strip() if diff_text and diff_text.strip() else str(patch_res.output)
+        diff_text.strip()
+        if diff_text and diff_text.strip()
+        else str(last_tool_dict.get("output", pending_patch))
     )
-    logger.info("Authoritative patch successfully applied to workspace.")
+    logger.info("Authoritative patch successfully applied to %d file(s).", len(chunks))
     return {
         "applied_diff": final_diff,
-        "tool_result": tool_dict,
+        "tool_result": last_tool_dict,
         "error": None,
         "current_step": 4,
     }
