@@ -297,10 +297,10 @@ async def inspect_workspace(state: AgentState) -> dict[str, Any]:
             "current_step": 1,
         }
 
-    if workspace_path:
-        settings.WORKSPACE_BASE_PATH = Path(workspace_path).resolve()
+    ws_obj = Path(workspace_path)
+    resolved_ws = ws_obj.resolve() if workspace_path else None
 
-    tool_res = list_files(recursive=True)
+    tool_res = list_files(recursive=True, workspace_root=resolved_ws)
     tool_result_dict = tool_res.model_dump()
 
     if not tool_res.success:
@@ -338,10 +338,14 @@ async def inspect_workspace(state: AgentState) -> dict[str, Any]:
     else:
         summary_blocks.append("Files in Workspace: (empty workspace)")
 
-    ws_path_obj = Path(workspace_path)
-    if (ws_path_obj / ".git").is_dir():
+    ws_path_obj = (
+        resolved_ws
+        if resolved_ws
+        else (Path(workspace_path) if workspace_path else None)
+    )
+    if ws_path_obj and (ws_path_obj / ".git").is_dir():
         try:
-            status_res = git_status()
+            status_res = git_status(workspace_root=resolved_ws)
             if status_res.success and status_res.output is not None:
                 if isinstance(status_res.output, str):
                     git_text = status_res.output.strip()
@@ -362,7 +366,7 @@ async def inspect_workspace(state: AgentState) -> dict[str, Any]:
     if manifest_candidates:
         primary_manifest = manifest_candidates[0]
         try:
-            read_res = read_file(primary_manifest, limit=20)
+            read_res = read_file(primary_manifest, limit=20, workspace_root=resolved_ws)
             if read_res.success and read_res.output is not None:
                 if isinstance(read_res.output, str):
                     manifest_text = read_res.output.strip()
@@ -486,25 +490,24 @@ async def coder(
             response_schema=CoderOutput,
             system_instruction=SYSTEM_SECURITY_INSTRUCTION,
         )
-        updates: dict[str, Any] = {
+        # INVARIANT: Every new proposal invalidates approval, applied_diff, and previous test_result
+        return {
             "coder_proposal": proposal,
             "pending_patch": proposal.patch,
+            "approval": None,
+            "applied_diff": None,
+            "test_result": None,
             "current_step": 3,
             "error": None,
         }
-
-        if (
-            state.get("approval") is False
-            or state.get("debugger_output") is not None
-            or state.get("repair_count", 0) > 0
-        ):
-            updates["approval"] = None
-
-        return updates
     except Exception as err:
         clean_err = sanitize_error_message(err)
         logger.error("Node [coder] code proposal generation failed: %s", clean_err)
         return {
+            "coder_proposal": None,
+            "pending_patch": None,
+            "approval": None,
+            "applied_diff": None,
             "error": f"Coder failed: {clean_err}",
             "current_step": 3,
         }
@@ -551,6 +554,7 @@ async def test_runner(
     workspace_path = state.get("workspace_path", "")
     test_command = state.get("test_command") or "pytest"
 
+    # Respect pre-populated non-stub results in unit tests when no patch was applied
     if (
         existing_result is not None
         and isinstance(existing_result, dict)
@@ -568,6 +572,7 @@ async def test_runner(
         or _execution_service is not None
     )
 
+    # Fail closed when the workspace is unavailable and no injected execution service exists.
     if not ws_obj.is_dir() and not has_custom_service:
         logger.error(
             "Node [test_runner] workspace '%s' does not exist and no execution service is available.",
@@ -583,40 +588,65 @@ async def test_runner(
                 "output": "Execution failed: workspace does not exist.",
                 "command": str(test_command),
                 "is_stub": False,
-                "execution_unavailable": True,
             },
             "current_step": 5,
         }
 
     exec_service = _resolve_execution_service(config)
-    authoritative_command: str = str(test_command)
 
     try:
-        raw_res = exec_service.execute_in_sandbox(
-            command=test_command,
-            workspace_path=workspace_path,
-            timeout_seconds=settings.SANDBOX_TIMEOUT_SECONDS,
+        raw_res = exec_service.execute(
+            command=test_command, workspace_path=workspace_path
         )
 
-        if not isinstance(raw_res, dict):
-            raise TypeError(
-                "ExecutionService.execute_in_sandbox() returned an invalid result type."
+        metadata = (
+            getattr(raw_res, "metadata", {})
+            if not isinstance(raw_res, dict)
+            else raw_res.get("metadata", {})
+        )
+        if not isinstance(metadata, dict):
+            metadata = {}
+
+        exit_code = metadata.get("exit_code")
+        if exit_code is None:
+            exit_code = getattr(raw_res, "exit_code", None)
+        if exit_code is None and isinstance(raw_res, dict):
+            exit_code = raw_res.get("exit_code")
+
+        stdout = metadata.get("stdout")
+        if not stdout:
+            stdout = (
+                getattr(raw_res, "stdout", "") or getattr(raw_res, "output", "") or ""
+            )
+        stderr = metadata.get("stderr")
+        if not stderr:
+            stderr = (
+                getattr(raw_res, "stderr", "") or getattr(raw_res, "error", "") or ""
             )
 
-        exit_code = raw_res.get("exit_code")
-        stdout = raw_res.get("stdout") or ""
-        stderr = raw_res.get("stderr") or ""
-        success = isinstance(exit_code, int) and exit_code == 0
-        authoritative_command = str(raw_res.get("command") or test_command)
+        if hasattr(raw_res, "success") and isinstance(
+            getattr(raw_res, "success"), bool
+        ):
+            success = bool(getattr(raw_res, "success"))
+        elif exit_code is not None:
+            success = exit_code == 0
+        elif isinstance(raw_res, dict) and "success" in raw_res:
+            success = bool(raw_res["success"])
+        else:
+            success = False
 
-        trunc_stdout = truncate_output(stdout, max_bytes=settings.MAX_TOOL_OUTPUT_BYTES)
+        trunc_stdout = truncate_output(
+            str(stdout), max_bytes=settings.MAX_TOOL_OUTPUT_BYTES
+        )
         bounded_stdout = (
             trunc_stdout[0]
             if isinstance(trunc_stdout, (tuple, list))
             else str(trunc_stdout)
         )
 
-        trunc_stderr = truncate_output(stderr, max_bytes=settings.MAX_TOOL_OUTPUT_BYTES)
+        trunc_stderr = truncate_output(
+            str(stderr), max_bytes=settings.MAX_TOOL_OUTPUT_BYTES
+        )
         bounded_stderr = (
             trunc_stderr[0]
             if isinstance(trunc_stderr, (tuple, list))
@@ -639,7 +669,7 @@ async def test_runner(
             "stdout": bounded_stdout,
             "stderr": bounded_stderr,
             "output": bounded_output,
-            "command": authoritative_command,
+            "command": str(test_command),
             "is_stub": False,
         }
     except Exception as err:
@@ -664,6 +694,9 @@ async def test_runner(
     }
 
 
+test_runner.__test__ = False
+
+
 async def debugger(
     state: AgentState, config: RunnableConfig | None = None
 ) -> dict[str, Any]:
@@ -676,6 +709,7 @@ async def debugger(
             "current_step": 6,
         }
 
+    # REPAIR GOVERNANCE: Increment repair count deterministically inside graph logic
     current_repairs = state.get("repair_count", 0) + 1
     if current_repairs > MAX_REPAIR_ITERATIONS:
         logger.warning(
@@ -804,13 +838,18 @@ async def finalize(state: AgentState) -> dict[str, Any]:
 
     if approval is False:
         status = "aborted"
-        summary = "Task aborted: human operator rejected the proposed changes."
-    elif error:
+        summary = (
+            f"Workflow aborted by human operator: {state.get('feedback', 'Rejected')}"
+        )
+    elif error is not None:
         status = "failed"
-        summary = f"Task failed: {error}"
+        summary = f"Workflow halted due to error: {error}"
     elif not test_passed:
         status = "failed"
-        summary = "Task failed: authoritative test verification did not pass."
+        if test_res is None:
+            summary = "Task failed: test verification was never executed."
+        else:
+            summary = f"Task failed: tests did not pass (repair count: {state.get('repair_count', 0)})."
     elif is_stub:
         status = "failed"
         summary = "Task failed: test verification was only a placeholder/stub."
@@ -889,7 +928,6 @@ async def apply_approved_patch(state: AgentState) -> dict[str, Any]:
         }
 
     resolved_ws = ws_obj.resolve()
-    settings.WORKSPACE_BASE_PATH = resolved_ws
 
     chunks = split_unified_diff(pending_patch)
     if not chunks:
@@ -943,6 +981,7 @@ async def apply_approved_patch(state: AgentState) -> dict[str, Any]:
         for f in coder_prop.files_changed:
             all_targets_to_validate.add(f)
 
+    # Validation Atomicity
     for target in all_targets_to_validate:
         if not target or target == "/dev/null":
             return {
@@ -1019,7 +1058,7 @@ async def apply_approved_patch(state: AgentState) -> dict[str, Any]:
     failure_err = ""
 
     for target, chunk_content in chunks:
-        patch_res = apply_patch(target, chunk_content)
+        patch_res = apply_patch(target, chunk_content, workspace_root=resolved_ws)
         last_tool_dict = patch_res.model_dump()
 
         if not patch_res.success:
@@ -1054,7 +1093,7 @@ async def apply_approved_patch(state: AgentState) -> dict[str, Any]:
 
     diff_text = ""
     try:
-        diff_res = get_diff()
+        diff_res = get_diff(workspace_root=resolved_ws)
         if diff_res.success and diff_res.output:
             if isinstance(diff_res.output, str):
                 diff_text = diff_res.output
@@ -1072,6 +1111,7 @@ async def apply_approved_patch(state: AgentState) -> dict[str, Any]:
     return {
         "applied_diff": final_diff,
         "tool_result": last_tool_dict,
+        "test_result": None,
         "error": None,
         "current_step": 4,
     }
