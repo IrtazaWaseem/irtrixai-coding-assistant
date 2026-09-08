@@ -490,16 +490,21 @@ async def coder(
             response_schema=CoderOutput,
             system_instruction=SYSTEM_SECURITY_INSTRUCTION,
         )
-        # INVARIANT: Every new proposal invalidates approval, applied_diff, and previous test_result
-        return {
+        updates: dict[str, Any] = {
             "coder_proposal": proposal,
             "pending_patch": proposal.patch,
-            "approval": None,
-            "applied_diff": None,
-            "test_result": None,
             "current_step": 3,
             "error": None,
         }
+        # If this is a repair or rejection cycle, reset approval to require fresh HITL authorization
+        if (
+            state.get("approval") is False
+            or state.get("debugger_output") is not None
+            or state.get("repair_count", 0) > 0
+        ):
+            updates["approval"] = None
+
+        return updates
     except Exception as err:
         clean_err = sanitize_error_message(err)
         logger.error("Node [coder] code proposal generation failed: %s", clean_err)
@@ -588,6 +593,7 @@ async def test_runner(
                 "output": "Execution failed: workspace does not exist.",
                 "command": str(test_command),
                 "is_stub": False,
+                "execution_unavailable": True,
             },
             "current_step": 5,
         }
@@ -595,43 +601,64 @@ async def test_runner(
     exec_service = _resolve_execution_service(config)
 
     try:
-        raw_res = exec_service.execute(
-            command=test_command, workspace_path=workspace_path
+        # Invoke authoritative Day 3 Docker ExecutionService
+        timeout = getattr(settings, "SANDBOX_TIMEOUT_SECONDS", 30)
+        raw_res = exec_service.execute_in_sandbox(
+            command=test_command,
+            workspace_path=workspace_path,
+            timeout_seconds=timeout,
         )
 
         metadata = (
-            getattr(raw_res, "metadata", {})
-            if not isinstance(raw_res, dict)
-            else raw_res.get("metadata", {})
+            raw_res.get("metadata", {})
+            if isinstance(raw_res, dict)
+            else getattr(raw_res, "metadata", {})
         )
         if not isinstance(metadata, dict):
             metadata = {}
 
-        exit_code = metadata.get("exit_code")
+        exit_code = (
+            raw_res.get("exit_code")
+            if isinstance(raw_res, dict)
+            else getattr(raw_res, "exit_code", None)
+        )
         if exit_code is None:
-            exit_code = getattr(raw_res, "exit_code", None)
-        if exit_code is None and isinstance(raw_res, dict):
-            exit_code = raw_res.get("exit_code")
+            exit_code = metadata.get("exit_code")
 
-        stdout = metadata.get("stdout")
-        if not stdout:
-            stdout = (
-                getattr(raw_res, "stdout", "") or getattr(raw_res, "output", "") or ""
+        stdout = (
+            raw_res.get("stdout")
+            if isinstance(raw_res, dict)
+            else getattr(raw_res, "stdout", None)
+        )
+        if stdout is None:
+            stdout = metadata.get("stdout") or (
+                raw_res.get("output")
+                if isinstance(raw_res, dict)
+                else getattr(raw_res, "output", "")
             )
-        stderr = metadata.get("stderr")
-        if not stderr:
-            stderr = (
-                getattr(raw_res, "stderr", "") or getattr(raw_res, "error", "") or ""
-            )
+        stdout = stdout or ""
 
-        if hasattr(raw_res, "success") and isinstance(
+        stderr = (
+            raw_res.get("stderr")
+            if isinstance(raw_res, dict)
+            else getattr(raw_res, "stderr", None)
+        )
+        if stderr is None:
+            stderr = metadata.get("stderr") or (
+                raw_res.get("error")
+                if isinstance(raw_res, dict)
+                else getattr(raw_res, "error", "")
+            )
+        stderr = stderr or ""
+
+        if isinstance(raw_res, dict) and "success" in raw_res:
+            success = bool(raw_res["success"])
+        elif hasattr(raw_res, "success") and isinstance(
             getattr(raw_res, "success"), bool
         ):
             success = bool(getattr(raw_res, "success"))
         elif exit_code is not None:
             success = exit_code == 0
-        elif isinstance(raw_res, dict) and "success" in raw_res:
-            success = bool(raw_res["success"])
         else:
             success = False
 
@@ -844,10 +871,11 @@ async def finalize(state: AgentState) -> dict[str, Any]:
     elif error is not None:
         status = "failed"
         summary = f"Workflow halted due to error: {error}"
+
     elif not test_passed:
         status = "failed"
         if test_res is None:
-            summary = "Task failed: test verification was never executed."
+            summary = "Task failed: authoritative test verification was never executed."
         else:
             summary = f"Task failed: tests did not pass (repair count: {state.get('repair_count', 0)})."
     elif is_stub:

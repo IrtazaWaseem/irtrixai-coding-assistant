@@ -1,6 +1,7 @@
 import asyncio
 import subprocess
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -23,7 +24,6 @@ from app.schemas.agent_contracts import (
     PlannerOutput,
 )
 from app.services.llm.gateway import LLMGateway
-from app.tools.base import ToolResult
 
 
 def init_test_git_repo(repo_path: Path) -> None:
@@ -53,30 +53,22 @@ def init_test_git_repo(repo_path: Path) -> None:
 
 
 def make_mock_exec_result(
-    success: bool,
     exit_code: int,
     stdout: str,
     stderr: str = "",
     command: list[str] | None = None,
-):
-    """Helper creating a ToolResult matching ExecutionService return contract."""
-    res = ToolResult(
-        tool_name="execution_service",
-        success=success,
-        output=stdout if success else (stdout or stderr),
-        error=stderr if not success else None,
-        metadata={
-            "exit_code": exit_code,
-            "stdout": stdout,
-            "stderr": stderr,
-            "command": command or ["pytest"],
-            "duration": 0.5,
-        },
-    )
-    setattr(res, "exit_code", exit_code)
-    setattr(res, "stdout", stdout)
-    setattr(res, "stderr", stderr)
-    return res
+    success: bool | None = None,
+) -> dict[str, Any]:
+    """Helper creating a dictionary matching ExecutionService.execute_in_sandbox return contract."""
+    return {
+        "exit_code": exit_code,
+        "stdout": stdout,
+        "stderr": stderr,
+        "command": command or ["pytest"],
+        "duration_seconds": 0.5,
+        "truncated": False,
+        "success": (exit_code == 0) if success is None else success,
+    }
 
 
 @pytest.mark.asyncio
@@ -231,8 +223,7 @@ async def test_graph_repair_coder_failure_cannot_bypass_hitl(tmp_path: Path):
     init_test_git_repo(tmp_path)
 
     mock_exec = MagicMock()
-    mock_exec.execute.return_value = make_mock_exec_result(
-        success=False,
+    mock_exec.execute_in_sandbox.return_value = make_mock_exec_result(
         exit_code=1,
         stdout="FAILED assert val == 2\n",
         stderr="",

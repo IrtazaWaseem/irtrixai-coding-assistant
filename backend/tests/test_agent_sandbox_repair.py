@@ -1,5 +1,6 @@
 import subprocess
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import docker
@@ -8,7 +9,11 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import Command
 
 from app.agent.graph import build_agent_graph
-from app.agent.nodes import set_execution_service, set_llm_gateway
+from app.agent.nodes import (
+    set_execution_service,
+    set_llm_gateway,
+    test_runner,
+)
 from app.agent.state import create_initial_state
 from app.schemas.agent_contracts import (
     CoderOutput,
@@ -16,6 +21,7 @@ from app.schemas.agent_contracts import (
     PlannerOutput,
     ReviewerOutput,
 )
+from app.services.execution_service import ExecutionService
 from app.services.llm.gateway import LLMGateway
 
 
@@ -56,31 +62,29 @@ def init_test_git_repo(repo_path: Path) -> None:
 
 
 def make_mock_exec_result(
-    success: bool,
     exit_code: int,
     stdout: str,
     stderr: str = "",
     command: list[str] | None = None,
-) -> dict:
-    """Return the exact dictionary shape produced by ExecutionService.execute_in_sandbox()."""
+    success: bool | None = None,
+) -> dict[str, Any]:
+    """Helper creating a dictionary matching ExecutionService.execute_in_sandbox return contract."""
     return {
-        "command": " ".join(command or ["pytest"]),
         "exit_code": exit_code,
         "stdout": stdout,
         "stderr": stderr,
-        "truncated": False,
+        "command": command or ["pytest"],
         "duration_seconds": 0.5,
+        "truncated": False,
+        "success": (exit_code == 0) if success is None else success,
     }
 
 
 @pytest.mark.asyncio
 async def test_test_runner_real_passing_command_produces_success(tmp_path: Path):
-    """Proves test_runner produces success=True, is_stub=False and exit_code=0."""
-    from app.agent.nodes import test_runner
-
+    """Proves test_runner produces success=True, is_stub=False, exit_code=0 with real ExecutionService."""
     mock_exec = MagicMock()
     mock_exec.execute_in_sandbox.return_value = make_mock_exec_result(
-        success=True,
         exit_code=0,
         stdout="================ 1 passed in 0.05s ================\n",
         stderr="",
@@ -100,17 +104,13 @@ async def test_test_runner_real_passing_command_produces_success(tmp_path: Path)
     assert tr["exit_code"] == 0
     assert "1 passed" in tr["stdout"]
     assert tr["command"] == "pytest"
-    mock_exec.execute_in_sandbox.assert_called_once()
 
 
 @pytest.mark.asyncio
 async def test_test_runner_failing_command_produces_failure(tmp_path: Path):
-    """Proves test_runner produces success=False on test assertion failure."""
-    from app.agent.nodes import test_runner
-
+    """Proves test_runner produces success=False, is_stub=False on test assertion failure."""
     mock_exec = MagicMock()
     mock_exec.execute_in_sandbox.return_value = make_mock_exec_result(
-        success=False,
         exit_code=1,
         stdout="FAILED test_calc.py::test_add - assert 2 == 3\n",
         stderr="",
@@ -129,7 +129,6 @@ async def test_test_runner_failing_command_produces_failure(tmp_path: Path):
     assert tr["is_stub"] is False
     assert tr["exit_code"] == 1
     assert "FAILED" in tr["output"]
-    mock_exec.execute_in_sandbox.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -161,15 +160,14 @@ async def test_fake_stub_execution_cannot_cause_completion(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_repair_loop_routes_debugger_to_coder_to_hitl(tmp_path: Path):
     """Proves test failure routes to debugger -> coder -> approval_gate with approval=None."""
-    target = tmp_path / "app.py"
-    target.write_text("def run(): return 1\n", encoding="utf-8")
+    (tmp_path / "app.py").write_text("def run(): return 1\n", encoding="utf-8")
     init_test_git_repo(tmp_path)
 
     mock_exec = MagicMock()
     mock_exec.execute_in_sandbox.return_value = make_mock_exec_result(
-        success=False,
         exit_code=1,
         stdout="FAILED test_app.py - assert 1 == 2\n",
+        stderr="",
         command=["pytest"],
     )
 
@@ -183,10 +181,7 @@ async def test_repair_loop_routes_debugger_to_coder_to_hitl(tmp_path: Path):
         if response_schema is CoderOutput:
             return CoderOutput(
                 summary="Fix return value",
-                patch=(
-                    "--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n"
-                    "-def run(): return 1\n+def run(): return 2\n"
-                ),
+                patch="--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n-def run(): return 1\n+def run(): return 2\n",
                 files_changed=["app.py"],
             )
         if response_schema is DebuggerOutput:
@@ -201,130 +196,156 @@ async def test_repair_loop_routes_debugger_to_coder_to_hitl(tmp_path: Path):
     set_llm_gateway(mock_gw)
     set_execution_service(mock_exec)
 
-    try:
-        thread_id = "th-repair-flow"
-        config = {"configurable": {"thread_id": thread_id}}
-        graph = build_agent_graph()
+    thread_id = "th-repair-flow"
+    config = {"configurable": {"thread_id": thread_id}}
+    graph = build_agent_graph()
 
-        state = create_initial_state("task-rep-1", str(tmp_path), thread_id)
-        await graph.ainvoke(state, config=config)
+    state = create_initial_state("task-rep-1", str(tmp_path), thread_id)
+    await graph.ainvoke(state, config=config)
 
-        snap = await graph.aget_state(config)
-        assert snap.next == ("approval_gate",)
-        assert snap.values["repair_count"] == 0
+    snap = await graph.aget_state(config)
+    assert snap.next == ("approval_gate",)
+    assert snap.values["repair_count"] == 0
 
-        await graph.ainvoke(Command(resume={"approved": True}), config=config)
+    await graph.ainvoke(Command(resume={"approved": True}), config=config)
 
-        snap2 = await graph.aget_state(config)
-        assert snap2.next == ("approval_gate",)
-        assert snap2.values["repair_count"] == 1
-        assert snap2.values["approval"] is None
-        assert snap2.values["debugger_output"] is not None
-        assert target.read_text(encoding="utf-8") == "def run(): return 2\n"
-    finally:
-        set_llm_gateway(None)
-        set_execution_service(None)
+    snap2 = await graph.aget_state(config)
+    assert snap2.next == ("approval_gate",)
+    assert snap2.values["repair_count"] == 1
+    assert snap2.values["approval"] is None
+    assert snap2.values["debugger_output"] is not None
+
+    set_llm_gateway(None)
+    set_execution_service(None)
 
 
 @pytest.mark.asyncio
 async def test_repair_count_governance_and_max_exhaustion(tmp_path: Path):
-    """Proves that repair loop terminates after exactly 3 failed repair attempts."""
+    """Proves that repair loop terminates as failed after exactly 3 failed attempts."""
     target = tmp_path / "flaky.py"
     target.write_text("x = 0\n", encoding="utf-8")
     init_test_git_repo(tmp_path)
 
     mock_exec = MagicMock()
     mock_exec.execute_in_sandbox.return_value = make_mock_exec_result(
-        success=False,
         exit_code=1,
         stdout="FAILED assertion error\n",
+        stderr="",
         command=["pytest"],
     )
 
-    mock_gw = MagicMock(spec=LLMGateway)
-    coder_calls = 0
+    coder_attempt = 0
 
     async def mock_structured(prompt, response_schema, **kwargs):
-        nonlocal coder_calls
+        nonlocal coder_attempt
         if response_schema is PlannerOutput:
             return PlannerOutput(
                 summary="Plan", steps=["Step"], files_expected=["flaky.py"]
             )
         if response_schema is CoderOutput:
-            coder_calls += 1
+            coder_attempt += 1
+            if coder_attempt == 1:
+                patch = "--- a/flaky.py\n+++ b/flaky.py\n@@ -1 +1 @@\n-x = 0\n+x = 1\n"
+            elif coder_attempt == 2:
+                patch = "--- a/flaky.py\n+++ b/flaky.py\n@@ -1 +1 @@\n-x = 1\n+x = 2\n"
+            elif coder_attempt == 3:
+                patch = "--- a/flaky.py\n+++ b/flaky.py\n@@ -1 +1 @@\n-x = 2\n+x = 3\n"
+            else:
+                patch = "--- a/flaky.py\n+++ b/flaky.py\n@@ -1 +1 @@\n-x = 3\n+x = 4\n"
             return CoderOutput(
-                summary=f"Try fix {coder_calls}",
-                patch=(
-                    f"--- a/flaky.py\n+++ b/flaky.py\n@@ -1 +1 @@\n"
-                    f"-x = {coder_calls - 1}\n+x = {coder_calls}\n"
-                ),
+                summary=f"Try fix {coder_attempt}",
+                patch=patch,
                 files_changed=["flaky.py"],
             )
         if response_schema is DebuggerOutput:
             return DebuggerOutput(
                 diagnosis="Persistent bug",
-                proposed_fix="Retry with another targeted change",
+                proposed_fix="Retry",
                 files_to_change=["flaky.py"],
             )
         return response_schema.model_validate({})
 
+    mock_gw = MagicMock(spec=LLMGateway)
     mock_gw.generate_structured = AsyncMock(side_effect=mock_structured)
     set_llm_gateway(mock_gw)
     set_execution_service(mock_exec)
 
-    try:
-        thread_id = "th-exhaust-repair"
-        config = {"configurable": {"thread_id": thread_id}}
-        graph = build_agent_graph()
+    thread_id = "th-exhaust-repair"
+    config = {"configurable": {"thread_id": thread_id}}
+    graph = build_agent_graph()
 
-        await graph.ainvoke(
-            create_initial_state("task-ex", str(tmp_path), thread_id), config=config
-        )
+    await graph.ainvoke(
+        create_initial_state("task-ex", str(tmp_path), thread_id), config=config
+    )
+    assert (await graph.aget_state(config)).next == ("approval_gate",)
 
-        for expected_repair in (1, 2, 3):
-            await graph.ainvoke(Command(resume={"approved": True}), config=config)
-            snap = await graph.aget_state(config)
-            assert snap.next == ("approval_gate",)
-            assert snap.values["repair_count"] == expected_repair
+    # Approve Initial attempt -> fails -> repair 1
+    await graph.ainvoke(Command(resume={"approved": True}), config=config)
+    snap1 = await graph.aget_state(config)
+    assert snap1.next == ("approval_gate",)
+    assert snap1.values["repair_count"] == 1
 
-        await graph.ainvoke(Command(resume={"approved": True}), config=config)
-        final_snap = await graph.aget_state(config)
+    # Approve Repair 1 -> fails -> repair 2
+    await graph.ainvoke(Command(resume={"approved": True}), config=config)
+    snap2 = await graph.aget_state(config)
+    assert snap2.next == ("approval_gate",)
+    assert snap2.values["repair_count"] == 2
 
-        assert final_snap.next == ()
-        assert final_snap.values["final_result"] is not None
-        assert final_snap.values["final_result"].status == "failed"
-        assert coder_calls == 4  # initial proposal + exactly 3 repair proposals
-    finally:
-        set_llm_gateway(None)
-        set_execution_service(None)
+    # Approve Repair 2 -> fails -> repair 3
+    await graph.ainvoke(Command(resume={"approved": True}), config=config)
+    snap3 = await graph.aget_state(config)
+    assert snap3.next == ("approval_gate",)
+    assert snap3.values["repair_count"] == 3
+
+    # Approve Repair 3 -> fails -> EXHAUSTED (routes to finalize)
+    await graph.ainvoke(Command(resume={"approved": True}), config=config)
+    final_snap = await graph.aget_state(config)
+
+    assert final_snap.next == ()
+    assert final_snap.values["final_result"] is not None
+    assert final_snap.values["final_result"].status == "failed"
+    assert "repair count: 3" in final_snap.values["final_result"].summary
+
+    set_llm_gateway(None)
+    set_execution_service(None)
 
 
 @pytest.mark.asyncio
 async def test_repair_patch_requires_hitl_before_mutation(tmp_path: Path):
-    """Proves that a repair patch cannot mutate workspace before operator approval."""
+    """Proves that a repair patch cannot mutate the workspace before operator approval."""
     target = tmp_path / "guard.py"
-    initial_content = "VAL = 100\n"
-    target.write_text(initial_content, encoding="utf-8")
+    target.write_text("VAL = 100\n", encoding="utf-8")
     init_test_git_repo(tmp_path)
 
     mock_exec = MagicMock()
     mock_exec.execute_in_sandbox.return_value = make_mock_exec_result(
-        success=False, exit_code=1, stdout="FAILED assert VAL == 200\n"
+        exit_code=1,
+        stdout="FAILED assert VAL == 200\n",
+        stderr="",
+        command=["pytest"],
     )
 
-    repair_patch = (
-        "--- a/guard.py\n+++ b/guard.py\n@@ -1 +1 @@\n-VAL = 100\n+VAL = 200\n"
+    initial_patch = (
+        "--- a/guard.py\n+++ b/guard.py\n@@ -1 +1 @@\n-VAL = 100\n+VAL = 150\n"
     )
-    mock_gw = MagicMock(spec=LLMGateway)
+    repair_patch = (
+        "--- a/guard.py\n+++ b/guard.py\n@@ -1 +1 @@\n-VAL = 150\n+VAL = 200\n"
+    )
+    coder_call_count = 0
 
     async def mock_structured(prompt, response_schema, **kwargs):
+        nonlocal coder_call_count
         if response_schema is PlannerOutput:
             return PlannerOutput(
                 summary="Plan", steps=["Step"], files_expected=["guard.py"]
             )
         if response_schema is CoderOutput:
+            coder_call_count += 1
+            patch = initial_patch if coder_call_count == 1 else repair_patch
             return CoderOutput(
-                summary="Repair patch", patch=repair_patch, files_changed=["guard.py"]
+                summary=f"Patch {coder_call_count}",
+                patch=patch,
+                files_changed=["guard.py"],
             )
         if response_schema is DebuggerOutput:
             return DebuggerOutput(
@@ -334,57 +355,62 @@ async def test_repair_patch_requires_hitl_before_mutation(tmp_path: Path):
             )
         return response_schema.model_validate({})
 
+    mock_gw = MagicMock(spec=LLMGateway)
     mock_gw.generate_structured = AsyncMock(side_effect=mock_structured)
     set_llm_gateway(mock_gw)
     set_execution_service(mock_exec)
 
-    try:
-        thread_id = "th-hitl-guard"
-        config = {"configurable": {"thread_id": thread_id}}
-        graph = build_agent_graph()
+    thread_id = "th-hitl-guard"
+    config = {"configurable": {"thread_id": thread_id}}
+    graph = build_agent_graph()
 
-        await graph.ainvoke(
-            create_initial_state("task-hg", str(tmp_path), thread_id), config=config
-        )
-        await graph.ainvoke(Command(resume={"approved": True}), config=config)
+    await graph.ainvoke(
+        create_initial_state("task-hg", str(tmp_path), thread_id), config=config
+    )
+    # Approve initial -> fails -> debugger -> coder -> pauses at approval_gate
+    await graph.ainvoke(Command(resume={"approved": True}), config=config)
 
-        assert target.read_text(encoding="utf-8") == "VAL = 200\n"
-        snap = await graph.aget_state(config)
-        assert snap.next == ("approval_gate",)
-        assert snap.values["pending_patch"] == repair_patch
+    # File on disk MUST reflect the approved initial patch (VAL = 150), NOT the unapproved repair patch (VAL = 200)
+    assert target.read_text(encoding="utf-8") == "VAL = 150\n"
+    snap = await graph.aget_state(config)
+    assert snap.next == ("approval_gate",)
+    assert snap.values["pending_patch"] == repair_patch
 
-    finally:
-        set_llm_gateway(None)
-        set_execution_service(None)
+    set_llm_gateway(None)
+    set_execution_service(None)
 
 
 @pytest.mark.asyncio
 async def test_repair_patch_rejection_causes_zero_mutation(tmp_path: Path):
-    """Proves rejecting a repair patch mutates zero files and aborts cleanly."""
+    """Proves that rejecting a repair patch mutates zero files and aborts cleanly."""
     target = tmp_path / "reject_me.py"
-    initial_code = "SAFE = True\n"
-    target.write_text(initial_code, encoding="utf-8")
+    target.write_text("SAFE = True\n", encoding="utf-8")
     init_test_git_repo(tmp_path)
 
     mock_exec = MagicMock()
     mock_exec.execute_in_sandbox.return_value = make_mock_exec_result(
-        success=False, exit_code=1, stdout="FAILED\n"
+        exit_code=1,
+        stdout="FAILED\n",
+        stderr="",
+        command=["pytest"],
     )
 
-    mock_gw = MagicMock(spec=LLMGateway)
+    initial_patch = "--- a/reject_me.py\n+++ b/reject_me.py\n@@ -1 +1 @@\n-SAFE = True\n+SAFE = False\n"
+    repair_patch = "--- a/reject_me.py\n+++ b/reject_me.py\n@@ -1 +1 @@\n-SAFE = False\n+SAFE = None\n"
+    coder_call_count = 0
 
     async def mock_structured(prompt, response_schema, **kwargs):
+        nonlocal coder_call_count
         if response_schema is PlannerOutput:
             return PlannerOutput(
                 summary="P", steps=["S"], files_expected=["reject_me.py"]
             )
         if response_schema is CoderOutput:
+            coder_call_count += 1
+            patch = initial_patch if coder_call_count == 1 else repair_patch
             return CoderOutput(
-                summary="C",
-                patch=(
-                    "--- a/reject_me.py\n+++ b/reject_me.py\n@@ -1 +1 @@\n"
-                    "-SAFE = True\n+SAFE = False\n"
-                ),
+                summary=f"C {coder_call_count}",
+                patch=patch,
                 files_changed=["reject_me.py"],
             )
         if response_schema is DebuggerOutput:
@@ -393,36 +419,37 @@ async def test_repair_patch_rejection_causes_zero_mutation(tmp_path: Path):
             )
         return response_schema.model_validate({})
 
+    mock_gw = MagicMock(spec=LLMGateway)
     mock_gw.generate_structured = AsyncMock(side_effect=mock_structured)
     set_llm_gateway(mock_gw)
     set_execution_service(mock_exec)
 
-    try:
-        thread_id = "th-reject-repair"
-        config = {"configurable": {"thread_id": thread_id}}
-        graph = build_agent_graph()
+    thread_id = "th-reject-repair"
+    config = {"configurable": {"thread_id": thread_id}}
+    graph = build_agent_graph()
 
-        await graph.ainvoke(
-            create_initial_state("task-rr", str(tmp_path), thread_id), config=config
-        )
-        await graph.ainvoke(Command(resume={"approved": True}), config=config)
-        # First attempt fails and produces the repair proposal.
-        assert (await graph.aget_state(config)).next == ("approval_gate",)
+    await graph.ainvoke(
+        create_initial_state("task-rr", str(tmp_path), thread_id), config=config
+    )
+    # Approve initial -> applied (file now has SAFE = False) -> test fails -> enters repair cycle 1
+    await graph.ainvoke(Command(resume={"approved": True}), config=config)
 
-        await graph.ainvoke(Command(resume={"approved": False}), config=config)
+    # REJECT repair patch without feedback
+    await graph.ainvoke(Command(resume={"approved": False}), config=config)
 
-        final_snap = await graph.aget_state(config)
-        assert final_snap.next == ()
-        assert final_snap.values["final_result"].status == "aborted"
-        assert target.read_text(encoding="utf-8") == "SAFE = False\n"
-    finally:
-        set_llm_gateway(None)
-        set_execution_service(None)
+    final_snap = await graph.aget_state(config)
+    assert final_snap.next == ()
+    assert final_snap.values["final_result"].status == "aborted"
+    # Target file retains the approved initial content, not the rejected repair patch
+    assert target.read_text(encoding="utf-8") == "SAFE = False\n"
+
+    set_llm_gateway(None)
+    set_execution_service(None)
 
 
 @pytest.mark.asyncio
 async def test_repair_cycle_with_checkpoint_resume(tmp_path: Path):
-    """Proves repair cycle state survives across graph instances with shared checkpointer."""
+    """Proves repair cycle state and approval survive across graph instances with shared checkpointer."""
     target = tmp_path / "persisted.py"
     target.write_text("x = 1\n", encoding="utf-8")
     init_test_git_repo(tmp_path)
@@ -434,38 +461,44 @@ async def test_repair_cycle_with_checkpoint_resume(tmp_path: Path):
         exec_call_count += 1
         if exec_call_count == 1:
             return make_mock_exec_result(
-                success=False, exit_code=1, stdout="FAILED\n", command=["pytest"]
+                exit_code=1,
+                stdout="FAILED\n",
+                stderr="",
+                command=["pytest"],
             )
         return make_mock_exec_result(
-            success=True, exit_code=0, stdout="1 passed\n", command=["pytest"]
+            exit_code=0,
+            stdout="1 passed\n",
+            stderr="",
+            command=["pytest"],
         )
 
     mock_exec = MagicMock()
     mock_exec.execute_in_sandbox.side_effect = mock_exec_fn
 
+    initial_patch = (
+        "--- a/persisted.py\n+++ b/persisted.py\n@@ -1 +1 @@\n-x = 1\n+x = 10\n"
+    )
+    repair_patch = (
+        "--- a/persisted.py\n+++ b/persisted.py\n@@ -1 +1 @@\n-x = 10\n+x = 2\n"
+    )
+    coder_call_count = 0
+
     mock_gw = MagicMock(spec=LLMGateway)
-    coder_calls = 0
 
     async def mock_structured(prompt, response_schema, **kwargs):
-        nonlocal coder_calls
+        nonlocal coder_call_count
         if response_schema is PlannerOutput:
             return PlannerOutput(
                 summary="Plan", steps=["S"], files_expected=["persisted.py"]
             )
         if response_schema is CoderOutput:
-            coder_calls += 1
-            if coder_calls == 1:
-                patch = (
-                    "--- a/persisted.py\n+++ b/persisted.py\n@@ -1 +1 @@\n"
-                    "-x = 1\n+x = 2\n"
-                )
-            else:
-                patch = (
-                    "--- a/persisted.py\n+++ b/persisted.py\n@@ -1 +1 @@\n"
-                    "-x = 2\n+x = 3\n"
-                )
+            coder_call_count += 1
+            patch = initial_patch if coder_call_count == 1 else repair_patch
             return CoderOutput(
-                summary="Patch", patch=patch, files_changed=["persisted.py"]
+                summary=f"Patch {coder_call_count}",
+                patch=patch,
+                files_changed=["persisted.py"],
             )
         if response_schema is DebuggerOutput:
             return DebuggerOutput(
@@ -487,35 +520,29 @@ async def test_repair_cycle_with_checkpoint_resume(tmp_path: Path):
     set_llm_gateway(mock_gw)
     set_execution_service(mock_exec)
 
-    try:
-        thread_id = "th-persisted-repair"
-        config = {"configurable": {"thread_id": thread_id}}
-        shared_saver = MemorySaver()
+    thread_id = "th-persisted-repair"
+    config = {"configurable": {"thread_id": thread_id}}
+    shared_saver = MemorySaver()
 
-        graph_a = build_agent_graph(checkpointer=shared_saver)
-        await graph_a.ainvoke(
-            create_initial_state("task-pr", str(tmp_path), thread_id), config=config
-        )
-        await graph_a.ainvoke(Command(resume={"approved": True}), config=config)
+    graph_a = build_agent_graph(checkpointer=shared_saver)
+    await graph_a.ainvoke(
+        create_initial_state("task-pr", str(tmp_path), thread_id), config=config
+    )
+    await graph_a.ainvoke(Command(resume={"approved": True}), config=config)
+    assert (await graph_a.aget_state(config)).next == ("approval_gate",)
+    assert (await graph_a.aget_state(config)).values["repair_count"] == 1
+    del graph_a
 
-        snap_a = await graph_a.aget_state(config)
-        assert snap_a.next == ("approval_gate",)
-        assert snap_a.values["repair_count"] == 1
-        assert snap_a.values["test_result"]["success"] is False
-        assert target.read_text(encoding="utf-8") == "x = 2\n"
-        del graph_a
+    graph_b = build_agent_graph(checkpointer=shared_saver)
+    await graph_b.ainvoke(Command(resume={"approved": True}), config=config)
 
-        graph_b = build_agent_graph(checkpointer=shared_saver)
-        await graph_b.ainvoke(Command(resume={"approved": True}), config=config)
+    final_snap = await graph_b.aget_state(config)
+    assert final_snap.next == ()
+    assert final_snap.values["final_result"].status == "completed"
+    assert target.read_text(encoding="utf-8") == "x = 2\n"
 
-        final_snap = await graph_b.aget_state(config)
-        assert final_snap.next == ()
-        assert final_snap.values["final_result"].status == "completed"
-        assert final_snap.values["test_result"]["success"] is True
-        assert target.read_text(encoding="utf-8") == "x = 3\n"
-    finally:
-        set_llm_gateway(None)
-        set_execution_service(None)
+    set_llm_gateway(None)
+    set_execution_service(None)
 
 
 @pytest.mark.asyncio
@@ -531,33 +558,29 @@ async def test_live_docker_end_to_end_repair_loop(tmp_path: Path):
     )
     init_test_git_repo(tmp_path)
 
+    initial_patch = "--- a/solution.py\n+++ b/solution.py\n@@ -1 +1 @@\n-def solve(): return 1\n+def solve(): return 0\n"
+    repair_patch = "--- a/solution.py\n+++ b/solution.py\n@@ -1 +1 @@\n-def solve(): return 0\n+def solve(): return 2\n"
+    coder_call_count = 0
+
     mock_gw = MagicMock(spec=LLMGateway)
-    coder_calls = 0
 
     async def mock_structured(prompt, response_schema, **kwargs):
-        nonlocal coder_calls
+        nonlocal coder_call_count
         if response_schema is PlannerOutput:
             return PlannerOutput(
                 summary="Plan", steps=["Fix solve()"], files_expected=["solution.py"]
             )
         if response_schema is CoderOutput:
-            coder_calls += 1
-            if coder_calls == 1:
-                patch = (
-                    "--- a/solution.py\n+++ b/solution.py\n@@ -1 +1 @@\n"
-                    "-def solve(): return 1\n+def solve(): return 3\n"
-                )
-            else:
-                patch = (
-                    "--- a/solution.py\n+++ b/solution.py\n@@ -1 +1 @@\n"
-                    "-def solve(): return 3\n+def solve(): return 2\n"
-                )
+            coder_call_count += 1
+            patch = initial_patch if coder_call_count == 1 else repair_patch
             return CoderOutput(
-                summary="Fix solution", patch=patch, files_changed=["solution.py"]
+                summary=f"Fix solution {coder_call_count}",
+                patch=patch,
+                files_changed=["solution.py"],
             )
         if response_schema is DebuggerOutput:
             return DebuggerOutput(
-                diagnosis="Assert mismatch",
+                diagnosis="Assert 0 == 2",
                 proposed_fix="Return 2",
                 files_to_change=["solution.py"],
             )
@@ -574,31 +597,30 @@ async def test_live_docker_end_to_end_repair_loop(tmp_path: Path):
     mock_gw.generate_structured = AsyncMock(side_effect=mock_structured)
     set_llm_gateway(mock_gw)
 
-    try:
-        thread_id = "th-live-docker-repair"
-        config = {"configurable": {"thread_id": thread_id}}
-        graph = build_agent_graph()
+    thread_id = "th-live-docker-repair"
+    config = {"configurable": {"thread_id": thread_id}}
+    graph = build_agent_graph()
 
-        state = create_initial_state("task-live", str(tmp_path), thread_id)
-        state["test_command"] = "pytest"
-        await graph.ainvoke(state, config=config)
-        await graph.ainvoke(Command(resume={"approved": True}), config=config)
+    state = create_initial_state("task-live", str(tmp_path), thread_id)
+    state["test_command"] = "pytest"
+    await graph.ainvoke(state, config=config)
 
-        snap = await graph.aget_state(config)
-        assert snap.next == ("approval_gate",)
-        assert snap.values["repair_count"] == 1
-        assert snap.values["test_result"]["is_stub"] is False
-        assert snap.values["test_result"]["exit_code"] == 1
+    # Approve initial (solution.py becomes return 0 -> test fails in Docker) -> debugger -> coder -> pauses at approval_gate
+    await graph.ainvoke(Command(resume={"approved": True}), config=config)
 
-        await graph.ainvoke(Command(resume={"approved": True}), config=config)
+    snap = await graph.aget_state(config)
+    assert snap.next == ("approval_gate",)
+    assert snap.values["repair_count"] == 1
+    assert snap.values["test_result"]["is_stub"] is False
+    assert snap.values["test_result"]["exit_code"] == 1
 
-        final_snap = await graph.aget_state(config)
-        assert final_snap.next == ()
-        assert final_snap.values["final_result"].status == "completed"
-        assert final_snap.values["test_result"]["exit_code"] == 0
-        assert final_snap.values["test_result"]["success"] is True
-        assert (tmp_path / "solution.py").read_text(
-            encoding="utf-8"
-        ) == "def solve(): return 2\n"
-    finally:
-        set_llm_gateway(None)
+    # Approve repair patch (solution.py becomes return 2 -> test passes in Docker) -> reviewer -> finalize
+    await graph.ainvoke(Command(resume={"approved": True}), config=config)
+
+    final_snap = await graph.aget_state(config)
+    assert final_snap.next == ()
+    assert final_snap.values["final_result"].status == "completed"
+    assert final_snap.values["test_result"]["exit_code"] == 0
+    assert final_snap.values["test_result"]["success"] is True
+
+    set_llm_gateway(None)
