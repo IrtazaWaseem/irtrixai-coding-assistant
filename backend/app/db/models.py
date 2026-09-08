@@ -71,6 +71,16 @@ class Task(Base, TimestampMixin):
         cascade="all, delete-orphan",
     )
 
+    @property
+    def workspace_path(self) -> str:
+        return self.workspace.root_path if self.workspace else ""
+
+    @property
+    def thread_id(self) -> str:
+        if self.runs and len(self.runs) > 0:
+            return self.runs[0].thread_id
+        return f"thread-{self.id}"
+
 
 class Run(Base):
     __tablename__ = "runs"
