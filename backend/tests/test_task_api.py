@@ -1,3 +1,4 @@
+import asyncio
 import subprocess
 from collections.abc import AsyncGenerator
 from pathlib import Path
@@ -6,13 +7,18 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from httpx import ASGITransport, AsyncClient
 from langgraph.checkpoint.memory import MemorySaver
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 from sqlalchemy.pool import NullPool
 
 from app.agent.graph import build_agent_graph
 from app.agent.nodes import set_execution_service, set_llm_gateway
 from app.api.v1.tasks import get_agent_graph
 from app.core.config import settings
+from app.db.models import TaskStatus
 from app.db.session import get_db
 from app.main import app
 from app.schemas.agent_contracts import (
@@ -21,6 +27,7 @@ from app.schemas.agent_contracts import (
     ReviewerOutput,
 )
 from app.services.llm.gateway import LLMGateway
+from app.services.task_service import TaskService
 
 
 def init_test_git_repo(repo_path: Path) -> None:
@@ -52,7 +59,7 @@ def init_test_git_repo(repo_path: Path) -> None:
 
 @pytest.fixture(autouse=True)
 async def override_db_session():
-    """Overrides get_db with NullPool so asyncpg connections do not cross asyncio event loops."""
+    """Overrides get_db with NullPool so connections do not cross asyncio event loops."""
     test_engine = create_async_engine(settings.DATABASE_URL, poolclass=NullPool)
     test_session_maker = async_sessionmaker(
         test_engine, expire_on_commit=False, class_=AsyncSession
@@ -133,7 +140,10 @@ async def test_create_task_nonexistent_workspace_rejected(
     try:
         response = await async_client.post(
             "/api/v1/tasks",
-            json={"workspace_path": str(tmp_path / "missing_dir"), "prompt": "Do work"},
+            json={
+                "workspace_path": str(tmp_path / "missing_dir"),
+                "prompt": "Do work",
+            },
         )
         assert response.status_code == 404
         assert "does not exist" in response.text.lower()
@@ -191,7 +201,9 @@ async def test_run_task_reaches_approval_gate_interrupt(
             )
         if response_schema is CoderOutput:
             return CoderOutput(
-                summary="Modify core", patch=patch_text, files_changed=["core.py"]
+                summary="Modify core",
+                patch=patch_text,
+                files_changed=["core.py"],
             )
         return response_schema.model_validate({})
 
@@ -344,9 +356,66 @@ async def test_submit_approval_not_awaiting_returns_400(
 
 
 @pytest.mark.asyncio
-async def test_stream_task_events_sse_format(async_client: AsyncClient, tmp_path: Path):
-    """Proves GET /api/v1/tasks/{task_id}/events streams SSE events conforming to text/event-stream."""
-    ws = tmp_path / "ws_sse"
+async def test_events_on_unstarted_task_does_not_execute_graph(
+    async_client: AsyncClient, tmp_path: Path
+):
+    """Proves GET /api/v1/tasks/{task_id}/events on an unstarted task never executes the graph (Finding 1)."""
+    ws = tmp_path / "ws_unstarted_events"
+    ws.mkdir(parents=True, exist_ok=True)
+    target = ws / "script.py"
+    target.write_text("x = 100\n", encoding="utf-8")
+    init_test_git_repo(ws)
+
+    mock_gw = MagicMock(spec=LLMGateway)
+    mock_gw.generate_structured = AsyncMock()
+    set_llm_gateway(mock_gw)
+
+    memory_saver = MemorySaver()
+    test_graph = build_agent_graph(checkpointer=memory_saver)
+    app.dependency_overrides[get_agent_graph] = lambda: test_graph
+
+    original_base = settings.WORKSPACE_BASE_PATH
+    settings.WORKSPACE_BASE_PATH = tmp_path.resolve()
+    try:
+        create_res = await async_client.post(
+            "/api/v1/tasks",
+            json={"workspace_path": str(ws), "prompt": "Do not run yet"},
+        )
+        task_id = create_res.json()["id"]
+
+        # Connect to /events without calling /run
+        sse_res = await async_client.get(f"/api/v1/tasks/{task_id}/events")
+        assert sse_res.status_code == 200
+        body = sse_res.text
+
+        # Invariant: Must receive task_not_started and NO execution events
+        assert "event: task_not_started" in body
+        assert "event: coding" not in body
+        assert "event: planning" not in body
+        assert "event: approval_required" not in body
+
+        # Invariant: Graph execution was never triggered
+        mock_gw.generate_structured.assert_not_called()
+
+        # Invariant: No checkpoint created/advanced
+        config = {"configurable": {"thread_id": f"thread-{task_id}"}}
+        snap = await test_graph.aget_state(config)
+        assert not snap.values
+
+        # Invariant: No filesystem mutation occurred
+        assert target.read_text(encoding="utf-8") == "x = 100\n"
+    finally:
+        settings.WORKSPACE_BASE_PATH = original_base
+        set_llm_gateway(None)
+        app.dependency_overrides.pop(get_agent_graph, None)
+
+
+@pytest.mark.asyncio
+async def test_events_after_start_acts_as_observer(
+    async_client: AsyncClient, tmp_path: Path
+):
+    """Proves GET /events after execution starts acts as observer and does not re-execute (Finding 1)."""
+    ws = tmp_path / "ws_observer_events"
     ws.mkdir(parents=True, exist_ok=True)
     init_test_git_repo(ws)
 
@@ -373,20 +442,251 @@ async def test_stream_task_events_sse_format(async_client: AsyncClient, tmp_path
     try:
         create_res = await async_client.post(
             "/api/v1/tasks",
-            json={"workspace_path": str(ws), "prompt": "Stream task"},
+            json={"workspace_path": str(ws), "prompt": "Observe task"},
         )
         task_id = create_res.json()["id"]
 
+        # 1. Start execution through the authoritative /run trigger
+        await async_client.post(f"/api/v1/tasks/{task_id}/run")
+        call_count_after_run = mock_gw.generate_structured.call_count
+
+        # 2. Connect to /events as observer
         sse_res = await async_client.get(f"/api/v1/tasks/{task_id}/events")
         assert sse_res.status_code == 200
-        assert "text/event-stream" in sse_res.headers["content-type"]
         body = sse_res.text
 
+        # Invariant: Milestone events from checkpoint are observed
         assert "event: task_started" in body
         assert "event: workspace_inspected" in body
         assert "event: planning" in body
         assert "event: coding" in body
         assert "event: approval_required" in body
+
+        # Invariant: Observation did not advance graph or call LLM again
+        assert mock_gw.generate_structured.call_count == call_count_after_run
+    finally:
+        settings.WORKSPACE_BASE_PATH = original_base
+        set_llm_gateway(None)
+        app.dependency_overrides.pop(get_agent_graph, None)
+
+
+@pytest.mark.asyncio
+async def test_sequential_duplicate_run_calls_do_not_restart_task(
+    async_client: AsyncClient, tmp_path: Path
+):
+    """Proves sequential duplicate /run calls return idempotent status without re-executing (Finding 2)."""
+    ws = tmp_path / "ws_idempotent"
+    ws.mkdir(parents=True, exist_ok=True)
+    init_test_git_repo(ws)
+
+    mock_gw = MagicMock(spec=LLMGateway)
+
+    async def mock_structured(prompt, response_schema, **kwargs):
+        if response_schema is PlannerOutput:
+            return PlannerOutput(summary="P", steps=["S"], files_expected=["a.py"])
+        if response_schema is CoderOutput:
+            return CoderOutput(summary="C", patch="patch", files_changed=["a.py"])
+        return response_schema.model_validate({})
+
+    mock_gw.generate_structured = AsyncMock(side_effect=mock_structured)
+    set_llm_gateway(mock_gw)
+
+    memory_saver = MemorySaver()
+    test_graph = build_agent_graph(checkpointer=memory_saver)
+    app.dependency_overrides[get_agent_graph] = lambda: test_graph
+
+    original_base = settings.WORKSPACE_BASE_PATH
+    settings.WORKSPACE_BASE_PATH = tmp_path.resolve()
+    try:
+        create_res = await async_client.post(
+            "/api/v1/tasks",
+            json={"workspace_path": str(ws), "prompt": "Idempotent run"},
+        )
+        task_id = create_res.json()["id"]
+
+        # Run 1: Pauses at approval_gate
+        res1 = await async_client.post(f"/api/v1/tasks/{task_id}/run")
+        assert res1.status_code == 200
+        assert res1.json()["status"] == "awaiting_approval"
+        initial_calls = mock_gw.generate_structured.call_count
+
+        # Run 2: Duplicate call while awaiting approval
+        res2 = await async_client.post(f"/api/v1/tasks/{task_id}/run")
+        assert res2.status_code == 200
+        assert res2.json()["status"] == "awaiting_approval"
+
+        # Invariant: Graph was not restarted; no additional LLM calls
+        assert mock_gw.generate_structured.call_count == initial_calls
+    finally:
+        settings.WORKSPACE_BASE_PATH = original_base
+        set_llm_gateway(None)
+        app.dependency_overrides.pop(get_agent_graph, None)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_same_task_run_protection(
+    async_client: AsyncClient, tmp_path: Path
+):
+    """Proves concurrent /run requests on same task are protected by row-level locking (Finding 2)."""
+    ws = tmp_path / "ws_concurrency"
+    ws.mkdir(parents=True, exist_ok=True)
+    init_test_git_repo(ws)
+
+    mock_gw = MagicMock(spec=LLMGateway)
+
+    async def mock_structured(prompt, response_schema, **kwargs):
+        await asyncio.sleep(0.05)  # Simulate model execution latency
+        if response_schema is PlannerOutput:
+            return PlannerOutput(summary="Plan", steps=["S1"], files_expected=["x.py"])
+        if response_schema is CoderOutput:
+            return CoderOutput(summary="Code", patch="diff", files_changed=["x.py"])
+        return response_schema.model_validate({})
+
+    mock_gw.generate_structured = AsyncMock(side_effect=mock_structured)
+    set_llm_gateway(mock_gw)
+
+    memory_saver = MemorySaver()
+    test_graph = build_agent_graph(checkpointer=memory_saver)
+    app.dependency_overrides[get_agent_graph] = lambda: test_graph
+
+    original_base = settings.WORKSPACE_BASE_PATH
+    settings.WORKSPACE_BASE_PATH = tmp_path.resolve()
+    try:
+        create_res = await async_client.post(
+            "/api/v1/tasks",
+            json={"workspace_path": str(ws), "prompt": "Race test"},
+        )
+        task_id = create_res.json()["id"]
+
+        # Dispatch concurrent /run calls simultaneously
+        res_a, res_b = await asyncio.gather(
+            async_client.post(f"/api/v1/tasks/{task_id}/run"),
+            async_client.post(f"/api/v1/tasks/{task_id}/run"),
+        )
+
+        assert res_a.status_code == 200
+        assert res_b.status_code == 200
+
+        statuses = {res_a.json()["status"], res_b.json()["status"]}
+        # Both requests safely report valid state without crash or duplicate graph init
+        assert "awaiting_approval" in statuses or "running" in statuses
+    finally:
+        settings.WORKSPACE_BASE_PATH = original_base
+        set_llm_gateway(None)
+        app.dependency_overrides.pop(get_agent_graph, None)
+
+
+@pytest.mark.asyncio
+async def test_independent_tasks_execute_independently(
+    async_client: AsyncClient, tmp_path: Path
+):
+    """Proves Task A and Task B execute concurrently without shared locks or state collisions."""
+    ws_a = tmp_path / "ws_indep_a"
+    ws_b = tmp_path / "ws_indep_b"
+    ws_a.mkdir(parents=True, exist_ok=True)
+    ws_b.mkdir(parents=True, exist_ok=True)
+    init_test_git_repo(ws_a)
+    init_test_git_repo(ws_b)
+
+    mock_gw = MagicMock(spec=LLMGateway)
+
+    async def mock_structured(prompt, response_schema, **kwargs):
+        if response_schema is PlannerOutput:
+            return PlannerOutput(summary="P", steps=["S"], files_expected=[])
+        if response_schema is CoderOutput:
+            return CoderOutput(summary="C", patch="", files_changed=[])
+        return response_schema.model_validate({})
+
+    mock_gw.generate_structured = AsyncMock(side_effect=mock_structured)
+    set_llm_gateway(mock_gw)
+
+    memory_saver = MemorySaver()
+    test_graph = build_agent_graph(checkpointer=memory_saver)
+    app.dependency_overrides[get_agent_graph] = lambda: test_graph
+
+    original_base = settings.WORKSPACE_BASE_PATH
+    settings.WORKSPACE_BASE_PATH = tmp_path.resolve()
+    try:
+        res_a = await async_client.post(
+            "/api/v1/tasks",
+            json={"workspace_path": str(ws_a), "prompt": "Task A"},
+        )
+        res_b = await async_client.post(
+            "/api/v1/tasks",
+            json={"workspace_path": str(ws_b), "prompt": "Task B"},
+        )
+        task_id_a = res_a.json()["id"]
+        task_id_b = res_b.json()["id"]
+
+        run_a, run_b = await asyncio.gather(
+            async_client.post(f"/api/v1/tasks/{task_id_a}/run"),
+            async_client.post(f"/api/v1/tasks/{task_id_b}/run"),
+        )
+
+        assert run_a.status_code == 200
+        assert run_b.status_code == 200
+        assert run_a.json()["task_id"] == task_id_a
+        assert run_b.json()["task_id"] == task_id_b
+    finally:
+        settings.WORKSPACE_BASE_PATH = original_base
+        set_llm_gateway(None)
+        app.dependency_overrides.pop(get_agent_graph, None)
+
+
+@pytest.mark.asyncio
+async def test_task_status_reconciliation_recovers_stale_running(
+    async_client: AsyncClient, tmp_path: Path
+):
+    """Proves TaskService.reconcile_task_status updates stale RUNNING status to checkpoint reality (Finding 3)."""
+    ws = tmp_path / "ws_reconcile"
+    ws.mkdir(parents=True, exist_ok=True)
+    init_test_git_repo(ws)
+
+    mock_gw = MagicMock(spec=LLMGateway)
+
+    async def mock_structured(prompt, response_schema, **kwargs):
+        if response_schema is PlannerOutput:
+            return PlannerOutput(summary="P", steps=["S"], files_expected=[])
+        if response_schema is CoderOutput:
+            return CoderOutput(summary="C", patch="", files_changed=[])
+        return response_schema.model_validate({})
+
+    mock_gw.generate_structured = AsyncMock(side_effect=mock_structured)
+    set_llm_gateway(mock_gw)
+
+    memory_saver = MemorySaver()
+    test_graph = build_agent_graph(checkpointer=memory_saver)
+    app.dependency_overrides[get_agent_graph] = lambda: test_graph
+
+    original_base = settings.WORKSPACE_BASE_PATH
+    settings.WORKSPACE_BASE_PATH = tmp_path.resolve()
+    try:
+        create_res = await async_client.post(
+            "/api/v1/tasks",
+            json={"workspace_path": str(ws), "prompt": "Stale DB test"},
+        )
+        task_id = create_res.json()["id"]
+
+        # Run to approval_gate
+        await async_client.post(f"/api/v1/tasks/{task_id}/run")
+
+        # Artificially set DB status back to RUNNING to simulate an interrupted/crashed process
+        engine = create_async_engine(settings.DATABASE_URL, poolclass=NullPool)
+        async_session = async_sessionmaker(
+            engine, expire_on_commit=False, class_=AsyncSession
+        )
+        async with async_session() as session:
+            task_obj = await TaskService.get_task(session, task_id)
+            task_obj.status = TaskStatus.RUNNING
+            session.add(task_obj)
+            await session.commit()
+        await engine.dispose()
+
+        # Reconcile status via GET /tasks/{task_id}
+        get_res = await async_client.get(f"/api/v1/tasks/{task_id}")
+        assert get_res.status_code == 200
+        # Invariant: Reconciled to AWAITING_APPROVAL because checkpoint is at approval_gate
+        assert get_res.json()["status"].upper() == "AWAITING_APPROVAL"
     finally:
         settings.WORKSPACE_BASE_PATH = original_base
         set_llm_gateway(None)

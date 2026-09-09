@@ -1,14 +1,19 @@
+import logging
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.agent.nodes import sanitize_error_message
 from app.core.exceptions import AppException
 from app.db.models import Run, Task, TaskStatus, Workspace
 from app.tools.validators import validate_workspace_dir
+
+logger = logging.getLogger(__name__)
 
 
 class TaskService:
@@ -74,6 +79,123 @@ class TaskService:
                 status_code=404,
                 message=f"Task '{task_id}' not found.",
             )
+        return task
+
+    @staticmethod
+    async def lock_task_for_run(db: AsyncSession, task_id: str) -> tuple[Task, bool]:
+        """Atomically locks the task row in PostgreSQL and verifies eligibility to start execution.
+
+        Returns (task, should_start_initial_run).
+        """
+        try:
+            task_uuid = uuid.UUID(task_id) if isinstance(task_id, str) else task_id
+        except (ValueError, AttributeError):
+            raise AppException(
+                status_code=404,
+                message=f"Task '{task_id}' not found.",
+            )
+
+        query = (
+            select(Task)
+            .options(selectinload(Task.workspace), selectinload(Task.runs))
+            .where(Task.id == task_uuid)
+            .with_for_update()
+        )
+        result = await db.execute(query)
+        task = result.scalar_one_or_none()
+        if not task:
+            raise AppException(
+                status_code=404,
+                message=f"Task '{task_id}' not found.",
+            )
+
+        if task.status == TaskStatus.PENDING:
+            task.status = TaskStatus.RUNNING
+            if task.runs and len(task.runs) > 0:
+                task.runs[-1].status = TaskStatus.RUNNING
+            await db.commit()
+            return task, True
+
+        await db.commit()
+        return task, False
+
+    @staticmethod
+    async def reconcile_task_status(
+        db: AsyncSession, task: Task, graph: Any = None
+    ) -> Task:
+        """Conservatively reconciles database Task.status against checkpointed LangGraph state."""
+        if task.status in (
+            TaskStatus.COMPLETED,
+            TaskStatus.FAILED,
+            TaskStatus.CANCELLED,
+        ):
+            return task
+
+        if graph is None:
+            try:
+                from app.agent.graph import get_production_graph
+
+                graph = get_production_graph()
+            except Exception:
+                return task
+
+        try:
+            config = {"configurable": {"thread_id": task.thread_id}}
+            snap = await graph.aget_state(config)
+
+            if not snap or not snap.values:
+                if task.status == TaskStatus.RUNNING:
+                    return await TaskService.update_task_status(
+                        db,
+                        task,
+                        "failed",
+                        error="Execution interrupted before first checkpoint.",
+                    )
+                return task
+
+            if snap.next == ("approval_gate",):
+                if task.status != TaskStatus.AWAITING_APPROVAL:
+                    return await TaskService.update_task_status(
+                        db, task, "awaiting_approval"
+                    )
+                return task
+
+            if not snap.next:
+                final = snap.values.get("final_result")
+                if final:
+                    st = getattr(final, "status", None) or (
+                        final.get("status") if isinstance(final, dict) else None
+                    )
+                    if st == "completed" and task.status != TaskStatus.COMPLETED:
+                        return await TaskService.update_task_status(
+                            db, task, "completed"
+                        )
+                    if st == "failed" and task.status != TaskStatus.FAILED:
+                        err = getattr(final, "summary", None) or (
+                            final.get("summary") if isinstance(final, dict) else None
+                        )
+                        return await TaskService.update_task_status(
+                            db, task, "failed", error=err
+                        )
+                    if st == "aborted" and task.status != TaskStatus.CANCELLED:
+                        return await TaskService.update_task_status(
+                            db, task, "cancelled"
+                        )
+                elif task.status == TaskStatus.RUNNING:
+                    return await TaskService.update_task_status(
+                        db,
+                        task,
+                        "failed",
+                        error="Workflow ended without finalization result.",
+                    )
+
+            if task.status == TaskStatus.PENDING and snap.values:
+                return await TaskService.update_task_status(db, task, "running")
+
+        except Exception as err:
+            clean_err = sanitize_error_message(err)
+            logger.debug("Task status reconciliation safely deferred: %s", clean_err)
+
         return task
 
     @staticmethod
