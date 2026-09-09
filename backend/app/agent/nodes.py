@@ -18,6 +18,7 @@ from app.schemas.agent_contracts import (
 from app.services.execution_service import ExecutionService
 from app.services.llm.base import sanitize_secret
 from app.services.llm.gateway import LLMGateway
+from app.tools.base import ToolResult
 from app.tools.file_tools import apply_patch, list_files, read_file
 from app.tools.git_tools import get_diff, git_status
 from app.tools.validators import (
@@ -714,9 +715,22 @@ async def test_runner(
             "is_stub": False,
         }
 
+    # Normalize execution outcome into established ToolResult contract
+    tool_res = ToolResult(
+        tool_name="execution_service",
+        success=test_result["success"],
+        output=test_result["output"],
+        error=test_result["stderr"] if not test_result["success"] else None,
+        metadata={
+            "exit_code": test_result["exit_code"],
+            "command": str(test_command),
+        },
+    )
+
     return {
         "test_command": test_command,
         "test_result": test_result,
+        "tool_result": tool_res.model_dump(),
         "current_step": 5,
     }
 
