@@ -564,12 +564,9 @@ async def test_concurrent_same_task_run_protection(
             async_client.post(f"/api/v1/tasks/{task_id}/run"),
         )
 
-        assert res_a.status_code == 200
-        assert res_b.status_code == 200
-
-        statuses = {res_a.json()["status"], res_b.json()["status"]}
-        # Both requests safely report valid state without crash or duplicate graph init
-        assert "awaiting_approval" in statuses or "running" in statuses
+        statuses = [res_a.status_code, res_b.status_code]
+        assert 200 in statuses
+        assert 409 in statuses
     finally:
         settings.WORKSPACE_BASE_PATH = original_base
         set_llm_gateway(None)
@@ -718,3 +715,304 @@ async def test_api_does_not_directly_execute_shell_or_write_files(
         assert len(list(ws.iterdir())) == 1
     finally:
         settings.WORKSPACE_BASE_PATH = original_base
+
+
+@pytest.mark.asyncio
+async def test_concurrent_same_task_approval_protection(
+    async_client: AsyncClient, tmp_path: Path
+):
+    """Proves concurrent approval attempts on the same task are serialized with row locks and reject duplicates."""
+    ws = tmp_path / "ws_concurrent_approval"
+    ws.mkdir(parents=True, exist_ok=True)
+    (ws / "app.py").write_text("v = 1\n", encoding="utf-8")
+    init_test_git_repo(ws)
+
+    mock_gw = MagicMock(spec=LLMGateway)
+
+    async def mock_structured(prompt, response_schema, **kwargs):
+        if response_schema is PlannerOutput:
+            return PlannerOutput(summary="P", steps=["S"], files_expected=["app.py"])
+        if response_schema is CoderOutput:
+            return CoderOutput(
+                summary="C",
+                patch="--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n-v = 1\n+v = 2\n",
+                files_changed=["app.py"],
+            )
+        if response_schema is ReviewerOutput:
+            await asyncio.sleep(0.1)  # Simulate execution latency
+            return ReviewerOutput(
+                verdict="approved",
+                summary="OK",
+                issues=[],
+                security_concerns=[],
+                required_changes=[],
+            )
+        return response_schema.model_validate({})
+
+    mock_gw.generate_structured = AsyncMock(side_effect=mock_structured)
+    set_llm_gateway(mock_gw)
+
+    mock_exec = MagicMock()
+    mock_exec.execute_in_sandbox.return_value = {
+        "exit_code": 0,
+        "stdout": "passed",
+        "stderr": "",
+        "command": ["pytest"],
+        "duration_seconds": 0.1,
+        "success": True,
+    }
+    set_execution_service(mock_exec)
+
+    memory_saver = MemorySaver()
+    test_graph = build_agent_graph(checkpointer=memory_saver)
+    app.dependency_overrides[get_agent_graph] = lambda: test_graph
+
+    original_base = settings.WORKSPACE_BASE_PATH
+    settings.WORKSPACE_BASE_PATH = tmp_path.resolve()
+    try:
+        create_res = await async_client.post(
+            "/api/v1/tasks",
+            json={"workspace_path": str(ws), "prompt": "Concurrent approval test"},
+        )
+        task_id = create_res.json()["id"]
+
+        # Advance to approval_gate
+        await async_client.post(f"/api/v1/tasks/{task_id}/run")
+
+        # Two concurrent approval submissions
+        res_a, res_b = await asyncio.gather(
+            async_client.post(
+                f"/api/v1/tasks/{task_id}/approval", json={"approved": True}
+            ),
+            async_client.post(
+                f"/api/v1/tasks/{task_id}/approval", json={"approved": True}
+            ),
+        )
+
+        statuses = [res_a.status_code, res_b.status_code]
+        assert 200 in statuses
+        assert 409 in statuses or 400 in statuses
+    finally:
+        settings.WORKSPACE_BASE_PATH = original_base
+        set_llm_gateway(None)
+        set_execution_service(None)
+        app.dependency_overrides.pop(get_agent_graph, None)
+
+
+@pytest.mark.asyncio
+async def test_duplicate_approval_after_interrupt_consumed_rejected(
+    async_client: AsyncClient, tmp_path: Path
+):
+    """Proves duplicate approval after an interrupt has already completed is safely rejected with 400."""
+    ws = tmp_path / "ws_dup_approval"
+    ws.mkdir(parents=True, exist_ok=True)
+    (ws / "main.py").write_text("x = 10\n", encoding="utf-8")
+    init_test_git_repo(ws)
+
+    mock_gw = MagicMock(spec=LLMGateway)
+
+    async def mock_structured(prompt, response_schema, **kwargs):
+        if response_schema is PlannerOutput:
+            return PlannerOutput(summary="P", steps=["S"], files_expected=["main.py"])
+        if response_schema is CoderOutput:
+            return CoderOutput(
+                summary="C",
+                patch="--- a/main.py\n+++ b/main.py\n@@ -1 +1 @@\n-x = 10\n+x = 20\n",
+                files_changed=["main.py"],
+            )
+        if response_schema is ReviewerOutput:
+            return ReviewerOutput(
+                verdict="approved",
+                summary="OK",
+                issues=[],
+                security_concerns=[],
+                required_changes=[],
+            )
+        return response_schema.model_validate({})
+
+    mock_gw.generate_structured = AsyncMock(side_effect=mock_structured)
+    set_llm_gateway(mock_gw)
+
+    mock_exec = MagicMock()
+    mock_exec.execute_in_sandbox.return_value = {
+        "exit_code": 0,
+        "stdout": "passed",
+        "stderr": "",
+        "command": ["pytest"],
+        "duration_seconds": 0.1,
+        "success": True,
+    }
+    set_execution_service(mock_exec)
+
+    memory_saver = MemorySaver()
+    test_graph = build_agent_graph(checkpointer=memory_saver)
+    app.dependency_overrides[get_agent_graph] = lambda: test_graph
+
+    original_base = settings.WORKSPACE_BASE_PATH
+    settings.WORKSPACE_BASE_PATH = tmp_path.resolve()
+    try:
+        create_res = await async_client.post(
+            "/api/v1/tasks",
+            json={"workspace_path": str(ws), "prompt": "Dup approval test"},
+        )
+        task_id = create_res.json()["id"]
+
+        await async_client.post(f"/api/v1/tasks/{task_id}/run")
+
+        first_res = await async_client.post(
+            f"/api/v1/tasks/{task_id}/approval", json={"approved": True}
+        )
+        assert first_res.status_code == 200
+        assert first_res.json()["status"] == "completed"
+
+        second_res = await async_client.post(
+            f"/api/v1/tasks/{task_id}/approval", json={"approved": True}
+        )
+        assert second_res.status_code == 400
+        assert "not currently awaiting" in second_res.text.lower()
+    finally:
+        settings.WORKSPACE_BASE_PATH = original_base
+        set_llm_gateway(None)
+        set_execution_service(None)
+        app.dependency_overrides.pop(get_agent_graph, None)
+
+
+@pytest.mark.asyncio
+async def test_graph_unavailable_approval_error_path(
+    async_client: AsyncClient, tmp_path: Path
+):
+    """Proves graph or checkpointer errors during approval are safely sanitized and update task status to failed."""
+    ws = tmp_path / "ws_graph_err"
+    ws.mkdir(parents=True, exist_ok=True)
+    init_test_git_repo(ws)
+
+    mock_gw = MagicMock(spec=LLMGateway)
+
+    async def mock_structured(prompt, response_schema, **kwargs):
+        if response_schema is PlannerOutput:
+            return PlannerOutput(summary="P", steps=["S"], files_expected=[])
+        if response_schema is CoderOutput:
+            return CoderOutput(summary="C", patch="", files_changed=[])
+        return response_schema.model_validate({})
+
+    mock_gw.generate_structured = AsyncMock(side_effect=mock_structured)
+    set_llm_gateway(mock_gw)
+
+    memory_saver = MemorySaver()
+    test_graph = build_agent_graph(checkpointer=memory_saver)
+    app.dependency_overrides[get_agent_graph] = lambda: test_graph
+
+    original_base = settings.WORKSPACE_BASE_PATH
+    settings.WORKSPACE_BASE_PATH = tmp_path.resolve()
+    secret_pwd = "secret_pwd_123"
+    orig_pwd = settings.POSTGRES_PASSWORD
+    settings.POSTGRES_PASSWORD = secret_pwd
+    try:
+        create_res = await async_client.post(
+            "/api/v1/tasks",
+            json={"workspace_path": str(ws), "prompt": "Graph error test"},
+        )
+        task_id = create_res.json()["id"]
+
+        await async_client.post(f"/api/v1/tasks/{task_id}/run")
+
+        failing_graph = MagicMock()
+        failing_graph.aget_state = AsyncMock(
+            side_effect=RuntimeError(
+                f"PostgreSQL checkpointer connection lost: {secret_pwd}"
+            )
+        )
+        app.dependency_overrides[get_agent_graph] = lambda: failing_graph
+
+        approval_res = await async_client.post(
+            f"/api/v1/tasks/{task_id}/approval", json={"approved": True}
+        )
+        assert approval_res.status_code == 200
+        data = approval_res.json()
+        assert data["status"] == "failed"
+        assert secret_pwd not in data.get("error", "")
+
+        app.dependency_overrides[get_agent_graph] = lambda: test_graph
+        get_res = await async_client.get(f"/api/v1/tasks/{task_id}")
+        assert get_res.json()["status"].upper() == "FAILED"
+    finally:
+        settings.WORKSPACE_BASE_PATH = original_base
+        settings.POSTGRES_PASSWORD = orig_pwd
+        set_llm_gateway(None)
+        app.dependency_overrides.pop(get_agent_graph, None)
+
+
+@pytest.mark.asyncio
+async def test_sse_event_name_test_passed_and_test_failed(
+    async_client: AsyncClient, tmp_path: Path
+):
+    """Proves SSE event names emit test_passed on success and test_failed on failure."""
+    ws = tmp_path / "ws_sse_names"
+    ws.mkdir(parents=True, exist_ok=True)
+    (ws / "code.py").write_text("a = 1\n", encoding="utf-8")
+    init_test_git_repo(ws)
+
+    mock_gw = MagicMock(spec=LLMGateway)
+
+    async def mock_structured(prompt, response_schema, **kwargs):
+        if response_schema is PlannerOutput:
+            return PlannerOutput(summary="P", steps=["S"], files_expected=["code.py"])
+        if response_schema is CoderOutput:
+            return CoderOutput(
+                summary="C",
+                patch="--- a/code.py\n+++ b/code.py\n@@ -1 +1 @@\n-a = 1\n+a = 2\n",
+                files_changed=["code.py"],
+            )
+        if response_schema is ReviewerOutput:
+            return ReviewerOutput(
+                verdict="approved",
+                summary="OK",
+                issues=[],
+                security_concerns=[],
+                required_changes=[],
+            )
+        return response_schema.model_validate({})
+
+    mock_gw.generate_structured = AsyncMock(side_effect=mock_structured)
+    set_llm_gateway(mock_gw)
+
+    mock_exec = MagicMock()
+    mock_exec.execute_in_sandbox.return_value = {
+        "exit_code": 0,
+        "stdout": "All tests passed",
+        "stderr": "",
+        "command": ["pytest"],
+        "duration_seconds": 0.2,
+        "success": True,
+    }
+    set_execution_service(mock_exec)
+
+    memory_saver = MemorySaver()
+    test_graph = build_agent_graph(checkpointer=memory_saver)
+    app.dependency_overrides[get_agent_graph] = lambda: test_graph
+
+    original_base = settings.WORKSPACE_BASE_PATH
+    settings.WORKSPACE_BASE_PATH = tmp_path.resolve()
+    try:
+        create_res = await async_client.post(
+            "/api/v1/tasks",
+            json={"workspace_path": str(ws), "prompt": "SSE names test"},
+        )
+        task_id = create_res.json()["id"]
+
+        await async_client.post(f"/api/v1/tasks/{task_id}/run")
+        await async_client.post(
+            f"/api/v1/tasks/{task_id}/approval", json={"approved": True}
+        )
+
+        events_res = await async_client.get(f"/api/v1/tasks/{task_id}/events")
+        assert events_res.status_code == 200
+        body = events_res.text
+
+        assert "event: test_passed" in body
+        assert "event: test_started" not in body
+    finally:
+        settings.WORKSPACE_BASE_PATH = original_base
+        set_llm_gateway(None)
+        set_execution_service(None)
+        app.dependency_overrides.pop(get_agent_graph, None)

@@ -202,17 +202,21 @@ async def submit_approval(
     graph=Depends(get_agent_graph),
 ) -> ExecutionResponse:
     """Submits operator decision for an awaiting-approval task and resumes execution."""
-    task = await TaskService.get_task(db, task_id)
+    task = await TaskService.prepare_task_for_approval(db, task_id)
     config = {"configurable": {"thread_id": task.thread_id}}
 
-    snap = await graph.aget_state(config)
-    if snap.next != ("approval_gate",):
-        raise AppException(
-            status_code=400,
-            message=f"Task '{task_id}' is not currently awaiting human approval.",
-        )
-
     try:
+        if graph is None:
+            raise RuntimeError("Checkpointer is not initialized.")
+
+        snap = await graph.aget_state(config)
+        if not snap or snap.next != ("approval_gate",):
+            await TaskService.reconcile_task_status(db, task, graph)
+            raise AppException(
+                status_code=400,
+                message=f"Task '{task_id}' is not currently awaiting human approval.",
+            )
+
         resume_cmd = Command(
             resume={"approved": payload.approved, "feedback": payload.feedback}
         )
@@ -255,6 +259,8 @@ async def submit_approval(
                 final.model_dump() if hasattr(final, "model_dump") else final
             ),
         )
+    except AppException:
+        raise
     except Exception as err:
         clean_err = sanitize_error_message(err)
         logger.error("Task approval error on task '%s': %s", task_id, clean_err)
@@ -274,54 +280,67 @@ async def stream_task_events(
 ) -> StreamingResponse:
     """Streams safe, high-level task execution events via Server-Sent Events (SSE).
 
-    Pure observation endpoint: will never autonomously start or advance an unstarted graph.
+    CRITICAL INVARIANT: This is strictly an observation endpoint.
+    It NEVER initiates execution or advances checkpoints for an unstarted task.
     """
     task = await TaskService.get_task(db, task_id)
     config = {"configurable": {"thread_id": task.thread_id}}
 
-    async def event_generator() -> AsyncGenerator[str, None]:
-        try:
-            snap = await graph.aget_state(config)
+    if graph is None:
+        raise AppException(
+            status_code=500,
+            message="Checkpointer is not initialized.",
+        )
 
-            # Invariant: /events MUST NOT start a never-run task
-            if not snap or not snap.values or task.status == TaskStatus.PENDING:
-                yield _format_sse(
-                    "task_not_started",
-                    {
-                        "task_id": str(task.id),
-                        "status": "pending",
-                        "message": "Task has not been started. Call POST /run to begin.",
-                    },
-                )
-                return
+    snap = await graph.aget_state(config)
 
+    if not snap or not snap.values or task.status == TaskStatus.PENDING:
+
+        async def unstarted_generator() -> AsyncGenerator[str, None]:
             yield _format_sse(
-                "task_started", {"task_id": str(task.id), "status": "running"}
+                "task_not_started",
+                {
+                    "task_id": str(task.id),
+                    "status": "pending",
+                    "message": "Task has not been started. Trigger execution via POST /run.",
+                },
             )
 
-            # Replay/observe already-executed state from checkpoint without advancing graph
-            vals = snap.values
-            if "workspace_summary" in vals:
+        return StreamingResponse(unstarted_generator(), media_type="text/event-stream")
+
+    async def event_generator() -> AsyncGenerator[str, None]:
+        st = (
+            task.status.value.lower()
+            if hasattr(task.status, "value")
+            else str(task.status).lower()
+        )
+        yield _format_sse("task_started", {"task_id": str(task.id), "status": st})
+
+        try:
+            if snap.values.get("workspace_summary") or snap.values.get("tech_stack"):
                 yield _format_sse(
                     "workspace_inspected",
                     {
-                        "step": vals.get("current_step", 1),
-                        "tech_stack": vals.get("tech_stack", []),
+                        "step": 1,
+                        "tech_stack": snap.values.get("tech_stack", []),
                     },
                 )
 
-            if "plan" in vals and vals["plan"] is not None:
-                plan = vals["plan"]
+            if snap.values.get("plan"):
+                plan = snap.values.get("plan")
                 summary = getattr(plan, "summary", None) or (
                     plan.get("summary") if isinstance(plan, dict) else None
                 )
                 yield _format_sse(
                     "planning",
-                    {"step": 2, "plan_summary": summary},
+                    {
+                        "step": 2,
+                        "plan_summary": summary,
+                    },
                 )
 
-            if "coder_proposal" in vals and vals["coder_proposal"] is not None:
-                prop = vals["coder_proposal"]
+            if snap.values.get("coder_proposal"):
+                prop = snap.values.get("coder_proposal")
                 summary = getattr(prop, "summary", None) or (
                     prop.get("summary") if isinstance(prop, dict) else None
                 )
@@ -337,8 +356,51 @@ async def stream_task_events(
                     },
                 )
 
+            if snap.values.get("applied_diff"):
+                yield _format_sse(
+                    "patch_applied",
+                    {
+                        "step": 4,
+                        "has_diff": bool(snap.values.get("applied_diff")),
+                    },
+                )
+
+            if snap.values.get("test_result"):
+                tr = snap.values.get("test_result") or {}
+                event_name = "test_passed" if tr.get("success") else "test_failed"
+                yield _format_sse(
+                    event_name,
+                    {
+                        "step": 5,
+                        "exit_code": tr.get("exit_code"),
+                        "command": tr.get("command"),
+                    },
+                )
+
+            if snap.values.get("debugger_output"):
+                yield _format_sse(
+                    "repair_started",
+                    {
+                        "step": 6,
+                        "repair_count": snap.values.get("repair_count", 0),
+                    },
+                )
+
+            if snap.values.get("review_summary"):
+                rev = snap.values.get("review_summary")
+                verdict = getattr(rev, "verdict", None) or (
+                    rev.get("verdict") if isinstance(rev, dict) else None
+                )
+                yield _format_sse(
+                    "review_started",
+                    {
+                        "step": 7,
+                        "verdict": verdict,
+                    },
+                )
+
             if snap.next == ("approval_gate",):
-                coder_prop = vals.get("coder_proposal")
+                coder_prop = snap.values.get("coder_proposal")
                 coder_summary = (
                     coder_prop.summary
                     if hasattr(coder_prop, "summary")
@@ -352,62 +414,29 @@ async def stream_task_events(
                     "approval_required",
                     {
                         "action": "human_approval_required",
-                        "pending_patch": vals.get("pending_patch"),
+                        "step": 4,
+                        "pending_patch": snap.values.get("pending_patch"),
                         "coder_summary": coder_summary,
                     },
                 )
-                return
 
-            if vals.get("applied_diff"):
-                yield _format_sse(
-                    "patch_applied",
-                    {"step": 4, "has_diff": True},
-                )
-
-            if vals.get("test_result"):
-                tr = vals["test_result"]
-                event_name = "test_started" if tr.get("success") else "test_failed"
-                yield _format_sse(
-                    event_name,
-                    {
-                        "step": 5,
-                        "exit_code": tr.get("exit_code"),
-                        "command": tr.get("command"),
-                    },
-                )
-
-            if vals.get("debugger_output"):
-                yield _format_sse(
-                    "repair_started",
-                    {"step": 6, "repair_count": vals.get("repair_count")},
-                )
-
-            if vals.get("review_summary"):
-                rev = vals["review_summary"]
-                verdict = getattr(rev, "verdict", None) or (
-                    rev.get("verdict") if isinstance(rev, dict) else None
-                )
-                yield _format_sse(
-                    "review_started",
-                    {"step": 7, "verdict": verdict},
-                )
-
-            if vals.get("final_result"):
-                fin = vals["final_result"]
-                st = getattr(fin, "status", None) or (
+            if not snap.next and snap.values.get("final_result"):
+                fin = snap.values.get("final_result")
+                fin_status = getattr(fin, "status", None) or (
                     fin.get("status") if isinstance(fin, dict) else "completed"
                 )
-                ev_name = "task_completed" if st == "completed" else "task_failed"
+                ev_name = (
+                    "task_completed" if fin_status == "completed" else "task_failed"
+                )
                 yield _format_sse(
                     ev_name,
                     {
                         "step": 8,
-                        "status": st,
+                        "status": fin_status,
                         "summary": getattr(fin, "summary", "")
                         or (fin.get("summary", "") if isinstance(fin, dict) else ""),
                     },
                 )
-
         except Exception as stream_err:
             clean_err = sanitize_error_message(stream_err)
             yield _format_sse("task_failed", {"error": clean_err})

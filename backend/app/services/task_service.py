@@ -82,10 +82,15 @@ class TaskService:
         return task
 
     @staticmethod
-    async def lock_task_for_run(db: AsyncSession, task_id: str) -> tuple[Task, bool]:
-        """Atomically locks the task row in PostgreSQL and verifies eligibility to start execution.
+    async def prepare_task_for_run(
+        db: AsyncSession, task_id: str, graph: Any = None
+    ) -> tuple[Task, bool]:
+        """Atomically locks the task row in PostgreSQL with FOR UPDATE and verifies eligibility to start execution.
 
-        Returns (task, should_start_initial_run).
+        Returns (task, should_execute):
+        - If should_execute is True, caller is the exclusive runner and must execute graph.
+        - If should_execute is False, task is already at approval_gate or completed.
+        - Raises AppException(409) if task is currently RUNNING.
         """
         try:
             task_uuid = uuid.UUID(task_id) if isinstance(task_id, str) else task_id
@@ -109,15 +114,81 @@ class TaskService:
                 message=f"Task '{task_id}' not found.",
             )
 
-        if task.status == TaskStatus.PENDING:
-            task.status = TaskStatus.RUNNING
-            if task.runs and len(task.runs) > 0:
-                task.runs[-1].status = TaskStatus.RUNNING
-            await db.commit()
-            return task, True
+        # Reconcile if marked RUNNING in DB
+        if task.status == TaskStatus.RUNNING and graph is not None:
+            task = await TaskService.reconcile_task_status(db, task, graph)
 
+        if task.status == TaskStatus.RUNNING:
+            raise AppException(
+                status_code=409,
+                message=f"Task '{task_id}' is currently running.",
+            )
+
+        if task.status in (TaskStatus.COMPLETED, TaskStatus.CANCELLED):
+            await db.commit()
+            return task, False
+
+        if task.status == TaskStatus.AWAITING_APPROVAL:
+            await db.commit()
+            return task, False
+
+        # Transition PENDING -> RUNNING atomically
+        task.status = TaskStatus.RUNNING
+        if task.runs and len(task.runs) > 0:
+            task.runs[-1].status = TaskStatus.RUNNING
+        db.add(task)
         await db.commit()
-        return task, False
+
+        return await TaskService.get_task(db, str(task.id)), True
+
+    lock_task_for_run = prepare_task_for_run
+
+    @staticmethod
+    async def prepare_task_for_approval(db: AsyncSession, task_id: str) -> Task:
+        """Fix #1: Atomically locks task row with FOR UPDATE and verifies task is AWAITING_APPROVAL."""
+        try:
+            task_uuid = uuid.UUID(task_id) if isinstance(task_id, str) else task_id
+        except (ValueError, AttributeError):
+            raise AppException(
+                status_code=404,
+                message=f"Task '{task_id}' not found.",
+            )
+
+        query = (
+            select(Task)
+            .options(selectinload(Task.workspace), selectinload(Task.runs))
+            .where(Task.id == task_uuid)
+            .with_for_update()
+        )
+        result = await db.execute(query)
+        task = result.scalar_one_or_none()
+        if not task:
+            raise AppException(
+                status_code=404,
+                message=f"Task '{task_id}' not found.",
+            )
+
+        if task.status == TaskStatus.RUNNING:
+            raise AppException(
+                status_code=409,
+                message=f"Task '{task_id}' is currently running.",
+            )
+
+        if task.status != TaskStatus.AWAITING_APPROVAL:
+            raise AppException(
+                status_code=400,
+                message=f"Task '{task_id}' is not currently awaiting human approval.",
+            )
+
+        task.status = TaskStatus.RUNNING
+        if task.runs and len(task.runs) > 0:
+            task.runs[-1].status = TaskStatus.RUNNING
+        db.add(task)
+        await db.commit()
+
+        return await TaskService.get_task(db, str(task.id))
+
+    lock_task_for_approval = prepare_task_for_approval
 
     @staticmethod
     async def reconcile_task_status(

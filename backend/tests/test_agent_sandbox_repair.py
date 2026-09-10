@@ -21,7 +21,6 @@ from app.schemas.agent_contracts import (
     PlannerOutput,
     ReviewerOutput,
 )
-from app.services.execution_service import ExecutionService
 from app.services.llm.gateway import LLMGateway
 
 
