@@ -20,6 +20,9 @@ class Settings(BaseSettings):
         "http://localhost:5173",
         "http://127.0.0.1:5173",
         "http://localhost:3000",
+        "http://localhost:3001",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:3001",
     ]
 
     # Database Configuration
@@ -60,6 +63,12 @@ class Settings(BaseSettings):
     MAX_SEARCH_FILE_SIZE: int = 524_288  # 500KB
     MAX_PATCH_SIZE: int = 262_144  # 256KB
     COMMAND_TIMEOUT_SECONDS: int = 30
+
+    # Day 9 Context Layer Bounded Limits
+    MAX_CONTEXT_FILES: int = 6
+    MAX_FILE_CONTEXT_BYTES: int = 8_000
+    MAX_TOTAL_CONTEXT_BYTES: int = 30_000
+    MAX_EXCERPT_LINES: int = 80
 
     # Day 3 Docker Sandbox Execution Settings
     DOCKER_SANDBOX_IMAGE: str = "irtrixai-sandbox:latest"

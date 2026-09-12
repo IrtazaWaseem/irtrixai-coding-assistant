@@ -23,12 +23,13 @@ from app.schemas.task import (
 from app.services.task_service import TaskService
 
 logger = logging.getLogger(__name__)
-
 router = APIRouter()
+
+# Active in-flight task execution tracker for concurrency protection (Finding 2)
+_running_tasks: set[str] = set()
 
 
 def get_agent_graph():
-    """Resolves production agent graph. Fails closed if checkpointer is uninitialized."""
     try:
         return get_production_graph()
     except Exception as err:
@@ -37,7 +38,6 @@ def get_agent_graph():
 
 
 def _format_sse(event: str, data: dict[str, Any]) -> str:
-    """Formats payload adhering to Server-Sent Events standard."""
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
@@ -46,7 +46,6 @@ async def create_task(
     payload: TaskCreate,
     db: AsyncSession = Depends(get_db),
 ) -> TaskResponse:
-    """Creates and persists a new coding task."""
     task = await TaskService.create_task(
         db, workspace_path=payload.workspace_path, prompt=payload.prompt
     )
@@ -59,7 +58,6 @@ async def get_task(
     db: AsyncSession = Depends(get_db),
     graph=Depends(get_agent_graph),
 ) -> TaskResponse:
-    """Retrieves metadata and status of an existing task."""
     task = await TaskService.get_task(db, task_id)
     if (
         str(task.status).upper() in ("RUNNING", "TASKSTATUS.RUNNING")
@@ -75,31 +73,36 @@ async def run_task(
     db: AsyncSession = Depends(get_db),
     graph=Depends(get_agent_graph),
 ) -> ExecutionResponse:
-    """Executes or continues execution of a task inside the agent graph.
+    if graph is None:
+        raise AppException(
+            status_code=500,
+            message="Checkpointer is not initialized.",
+        )
 
-    Protected against concurrent same-task race conditions via row-level locks.
-    """
-    task, should_start = await TaskService.lock_task_for_run(db, task_id)
-    config = {"configurable": {"thread_id": task.thread_id}}
+    # Concurrency guard: reject concurrent /run executions on the same task with 409
+    if task_id in _running_tasks:
+        raise AppException(
+            status_code=409,
+            message=f"Task '{task_id}' is currently running.",
+        )
 
+    _running_tasks.add(task_id)
     try:
-        snap = await graph.aget_state(config)
+        task, should_execute = await TaskService.prepare_task_for_run(
+            db, task_id, graph
+        )
+        config = {"configurable": {"thread_id": task.thread_id}}
 
-        # Reconcile if graph is already in a non-initial state or already executed
-        if not should_start:
-            if task.status == TaskStatus.RUNNING:
-                return ExecutionResponse(
-                    task_id=str(task.id),
-                    status="running",
-                    current_step=(
-                        snap.values.get("current_step", 1)
-                        if snap and snap.values
-                        else 1
-                    ),
+        if not should_execute:
+            st = str(getattr(task, "status", "")).lower()
+            if "running" in st:
+                raise AppException(
+                    status_code=409,
+                    message=f"Task '{task_id}' is currently running.",
                 )
 
-            if snap.next == ("approval_gate",):
-                await TaskService.update_task_status(db, task, "awaiting_approval")
+            snap = await graph.aget_state(config)
+            if snap and snap.next == ("approval_gate",):
                 coder_prop = snap.values.get("coder_proposal")
                 coder_summary = (
                     coder_prop.summary
@@ -121,29 +124,38 @@ async def run_task(
                         "coder_summary": coder_summary,
                     },
                 )
-
-            if not snap.next and snap.values:
-                final = snap.values.get("final_result")
-                status = getattr(final, "status", None) or (
-                    final.get("status") if isinstance(final, dict) else "completed"
+            final = snap.values.get("final_result") if snap else None
+            status = getattr(final, "status", None) or (
+                final.get("status")
+                if isinstance(final, dict)
+                else (
+                    task.status.value.lower()
+                    if hasattr(task.status, "value")
+                    else str(task.status).lower()
                 )
-                return ExecutionResponse(
-                    task_id=str(task.id),
-                    status=status,
-                    current_step=snap.values.get("current_step", 8),
-                    final_result=(
-                        final.model_dump() if hasattr(final, "model_dump") else final
-                    ),
-                )
+            )
+            return ExecutionResponse(
+                task_id=str(task.id),
+                status=status,
+                current_step=snap.values.get("current_step", 8) if snap else 8,
+                final_result=(
+                    final.model_dump() if hasattr(final, "model_dump") else final
+                ),
+            )
 
-        # Initial execution execution pathway
-        initial_state = create_initial_state(
-            task_id=str(task.id),
-            workspace_path=task.workspace_path,
-            thread_id=task.thread_id,
-            prompt=task.prompt,
-        )
-        await graph.ainvoke(initial_state, config=config)
+        await TaskService.update_task_status(db, task, "running")
+
+        snap = await graph.aget_state(config)
+        if not snap or not snap.values:
+            initial_state = create_initial_state(
+                task_id=str(task.id),
+                workspace_path=task.workspace_path,
+                thread_id=task.thread_id,
+                prompt=task.prompt,
+            )
+            await graph.ainvoke(initial_state, config=config)
+        else:
+            await graph.ainvoke(None, config=config)
 
         post_snap = await graph.aget_state(config)
 
@@ -183,6 +195,8 @@ async def run_task(
             ),
         )
 
+    except AppException:
+        raise
     except Exception as err:
         clean_err = sanitize_error_message(err)
         logger.error("Task execution error on task '%s': %s", task_id, clean_err)
@@ -192,6 +206,8 @@ async def run_task(
             status="failed",
             error=clean_err,
         )
+    finally:
+        _running_tasks.discard(task_id)
 
 
 @router.post("/{task_id}/approval", response_model=ExecutionResponse)
@@ -201,7 +217,6 @@ async def submit_approval(
     db: AsyncSession = Depends(get_db),
     graph=Depends(get_agent_graph),
 ) -> ExecutionResponse:
-    """Submits operator decision for an awaiting-approval task and resumes execution."""
     task = await TaskService.prepare_task_for_approval(db, task_id)
     config = {"configurable": {"thread_id": task.thread_id}}
 
@@ -278,11 +293,6 @@ async def stream_task_events(
     db: AsyncSession = Depends(get_db),
     graph=Depends(get_agent_graph),
 ) -> StreamingResponse:
-    """Streams safe, high-level task execution events via Server-Sent Events (SSE).
-
-    CRITICAL INVARIANT: This is strictly an observation endpoint.
-    It NEVER initiates execution or advances checkpoints for an unstarted task.
-    """
     task = await TaskService.get_task(db, task_id)
     config = {"configurable": {"thread_id": task.thread_id}}
 
@@ -302,7 +312,9 @@ async def stream_task_events(
                 {
                     "task_id": str(task.id),
                     "status": "pending",
-                    "message": "Task has not been started. Trigger execution via POST /run.",
+                    "message": (
+                        "Task has not been started. Trigger execution via POST /run."
+                    ),
                 },
             )
 
@@ -323,6 +335,19 @@ async def stream_task_events(
                     {
                         "step": 1,
                         "tech_stack": snap.values.get("tech_stack", []),
+                    },
+                )
+
+            # Day 9 SSE Observation Event
+            if snap.values.get("repository_context"):
+                rc = snap.values.get("repository_context") or {}
+                yield _format_sse(
+                    "repository_context_ready",
+                    {
+                        "step": 1,
+                        "files_selected": rc.get("files_included", 0),
+                        "total_context_bytes": rc.get("total_context_bytes", 0),
+                        "truncated": rc.get("truncated", False),
                     },
                 )
 
@@ -433,8 +458,10 @@ async def stream_task_events(
                     {
                         "step": 8,
                         "status": fin_status,
-                        "summary": getattr(fin, "summary", "")
-                        or (fin.get("summary", "") if isinstance(fin, dict) else ""),
+                        "summary": (
+                            getattr(fin, "summary", "")
+                            or (fin.get("summary", "") if isinstance(fin, dict) else "")
+                        ),
                     },
                 )
         except Exception as stream_err:

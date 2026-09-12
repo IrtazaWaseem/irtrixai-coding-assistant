@@ -1,161 +1,183 @@
-from typing import Literal
+import json
+import re
+from enum import Enum
+from typing import Any, TypeVar
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, Field, field_validator
+
+T = TypeVar("T", bound=BaseModel)
+
+
+class ReviewerVerdict(str, Enum):
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    CHANGES_REQUESTED = "changes_requested"
+
+
+class FinalizationStatus(str, Enum):
+    COMPLETED = "completed"
+    FAILED = "failed"
+    ABORTED = "aborted"
 
 
 class PlannerOutput(BaseModel):
-    """Contract for planner agent output."""
-
-    model_config = ConfigDict(frozen=True, extra="ignore")
-
     summary: str = Field(
-        ..., description="High-level reasoning summary and plan objective"
+        ..., min_length=1, description="High-level architectural summary"
     )
-    steps: list[str] = Field(..., description="Ordered step-by-step execution plan")
+    steps: list[str] = Field(
+        ..., min_length=1, description="Concrete implementation sequence"
+    )
     plan_id: str | None = Field(default=None, description="Optional plan identifier")
     files_expected: list[str] = Field(
-        default_factory=list,
-        description="Files anticipated to be read or modified",
+        default_factory=list, description="Target workspace paths"
     )
     risk_notes: list[str] = Field(
-        default_factory=list,
-        description="Potential risks, edge cases, or side effects",
+        default_factory=list, description="Risk considerations"
+    )
+    risks_and_mitigations: list[str] = Field(
+        default_factory=list, description="Edge cases and mitigations"
     )
 
-    @field_validator("summary", mode="after")
+    @field_validator("summary")
     @classmethod
     def validate_summary(cls, v: str) -> str:
         if not v or not v.strip():
-            raise ValueError("Planner summary cannot be empty or whitespace.")
-        return v.strip()
+            raise ValueError("summary cannot be empty or blank")
+        return v
 
-    @field_validator("steps", mode="after")
+    @field_validator("steps")
     @classmethod
     def validate_steps(cls, v: list[str]) -> list[str]:
-        cleaned = [s.strip() for s in v if s and s.strip()]
-        if not cleaned:
-            raise ValueError("Planner steps must contain at least one non-empty step.")
-        return cleaned
+        if not v:
+            raise ValueError("steps cannot be empty")
+        for s in v:
+            if not isinstance(s, str) or not s.strip():
+                raise ValueError("steps cannot contain empty or blank items")
+        return v
 
 
 class CoderOutput(BaseModel):
-    """Contract for coder agent output."""
-
-    model_config = ConfigDict(frozen=True, extra="ignore")
-
-    summary: str = Field(..., description="Summary of implementation changes performed")
-    requested_changes: list[str] = Field(
-        default_factory=list,
-        description="Detailed itemized changes made or requested",
+    summary: str = Field(
+        ..., min_length=1, description="Summary of proposed code mutations"
     )
-    patch: str | None = Field(
-        default=None, description="Proposed unified diff patch or change content"
-    )
+    patch: str = Field(default="", description="Standard unified diff or patch block")
     files_changed: list[str] = Field(
-        default_factory=list,
-        description="List of workspace-relative files touched or modified",
+        default_factory=list, description="List of workspace-relative paths"
     )
 
-    @field_validator("summary", mode="after")
+    @field_validator("summary")
     @classmethod
     def validate_summary(cls, v: str) -> str:
         if not v or not v.strip():
-            raise ValueError("Coder summary cannot be empty or whitespace.")
-        return v.strip()
+            raise ValueError("summary cannot be empty or blank")
+        return v
 
 
 class DebuggerOutput(BaseModel):
-    """Contract for debugger agent output."""
-
-    model_config = ConfigDict(frozen=True, extra="ignore")
-
-    diagnosis: str = Field(
-        ..., description="Root-cause diagnosis of failure, test, or runtime defect"
-    )
-    proposed_fix: str = Field(
-        ..., description="Detailed explanation of proposed remediation"
-    )
+    diagnosis: str = Field(..., description="Root cause of test failure")
+    proposed_fix: str = Field(..., description="Actionable fix direction for the Coder")
     files_to_change: list[str] = Field(
-        default_factory=list,
-        description="Target files identified as requiring modification",
+        default_factory=list, description="Files requiring repair"
     )
     reproduction_command: str | None = Field(
-        default=None,
-        description="Optional command to reproduce the defect or verify the fix",
+        default=None, description="Command to reproduce test failure"
     )
-
-    @field_validator("diagnosis", "proposed_fix", mode="after")
-    @classmethod
-    def validate_non_empty(cls, v: str) -> str:
-        if not v or not v.strip():
-            raise ValueError(
-                "Diagnosis and proposed_fix cannot be empty or whitespace."
-            )
-        return v.strip()
-
-
-ReviewerVerdict = Literal["approved", "changes_requested", "rejected"]
 
 
 class ReviewerOutput(BaseModel):
-    """Contract for reviewer agent output."""
-
-    model_config = ConfigDict(frozen=True, extra="ignore")
-
-    verdict: ReviewerVerdict = Field(
-        ...,
-        description="Review outcome: 'approved', 'changes_requested', or 'rejected'",
-    )
-    summary: str = Field(..., description="Evaluation summary of the implementation")
-    issues: list[str] = Field(
-        default_factory=list,
-        description="Functional, architectural, or performance defects identified",
-    )
+    verdict: ReviewerVerdict = Field(..., description="Review outcome")
+    summary: str = Field(..., description="Audit verdict justification")
+    issues: list[str] = Field(default_factory=list, description="Defects found")
     security_concerns: list[str] = Field(
-        default_factory=list,
-        description="Security concerns or policy violations identified",
+        default_factory=list, description="Security findings"
     )
     required_changes: list[str] = Field(
-        default_factory=list,
-        description="Mandatory changes required prior to approval",
+        default_factory=list, description="Mandatory remedies"
     )
-
-    @field_validator("summary", mode="after")
-    @classmethod
-    def validate_summary(cls, v: str) -> str:
-        if not v or not v.strip():
-            raise ValueError("Reviewer summary cannot be empty or whitespace.")
-        return v.strip()
-
-
-FinalizationStatus = Literal["completed", "failed", "aborted"]
 
 
 class FinalizationResult(BaseModel):
-    """Contract for agent workflow completion output."""
+    status: FinalizationStatus = Field(..., description="Workflow final state")
+    summary: str = Field(..., description="Executive final outcome report")
+    files_changed: list[str] = Field(default_factory=list)
+    tests: list[str] = Field(default_factory=list)
+    review: ReviewerOutput | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
-    model_config = ConfigDict(frozen=True, extra="ignore")
 
-    status: FinalizationStatus = Field(
-        ...,
-        description="Final execution status: 'completed', 'failed', or 'aborted'",
+def parse_structured_output(text: Any, schema: type[T]) -> T:
+    """Parses JSON string, markdown codeblock, or dict into the requested Pydantic schema."""
+    if isinstance(text, dict):
+        return schema.model_validate(text)
+
+    if not text or not str(text).strip():
+        raise ValueError("Empty output cannot be parsed into structured schema.")
+
+    cleaned = str(text).strip()
+    match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", cleaned)
+    if match:
+        cleaned = match.group(1).strip()
+
+    try:
+        data = json.loads(cleaned)
+    except Exception as e:
+        raise ValueError(f"Failed to parse JSON from model output: {e}") from e
+
+    try:
+        return schema.model_validate(data)
+    except Exception as e:
+        raise ValueError(f"Validation error for {schema.__name__}: {e}") from e
+
+
+# Day 9 Context Layer Schemas
+class RelevantFileContext(BaseModel):
+    path: str = Field(..., description="Workspace-relative path of the relevant file")
+    relevance_score: float = Field(
+        default=0.0, description="Deterministic relevance score"
     )
-    summary: str = Field(..., description="Comprehensive summary of task outcome")
-    files_changed: list[str] = Field(
-        default_factory=list,
-        description="Consolidated list of modified files",
+    reason: str = Field(
+        default="", description="Reason this file was determined relevant"
     )
-    tests: list[str] = Field(
-        default_factory=list,
-        description="List of test commands or verification suites executed",
+    excerpt: str = Field(default="", description="Bounded text excerpt from the file")
+    start_line: int = Field(default=1, description="1-based start line of the excerpt")
+    end_line: int = Field(default=1, description="1-based end line of the excerpt")
+    truncated: bool = Field(default=False, description="Whether excerpt was truncated")
+
+
+class RepositoryContext(BaseModel):
+    summary: str = Field(
+        default="", description="Summary of repository context and relevance"
     )
-    review: ReviewerOutput | None = Field(
-        default=None, description="Final review audit if conducted"
+    tech_stack: list[str] = Field(
+        default_factory=list, description="Detected technology stack"
+    )
+    relevant_files: list[RelevantFileContext] = Field(
+        default_factory=list, description="Ranked relevant files with excerpts"
+    )
+    total_files_considered: int = Field(
+        default=0, description="Total workspace files evaluated"
+    )
+    files_included: int = Field(
+        default=0, description="Count of relevant files included"
+    )
+    truncated: bool = Field(
+        default=False,
+        description="Whether total context limits caused truncation",
+    )
+    total_context_bytes: int = Field(
+        default=0, description="Total byte size of all excerpts included"
     )
 
-    @field_validator("summary", mode="after")
-    @classmethod
-    def validate_summary(cls, v: str) -> str:
-        if not v or not v.strip():
-            raise ValueError("Finalization summary cannot be empty or whitespace.")
-        return v.strip()
+
+__all__ = [
+    "FinalizationStatus",
+    "ReviewerVerdict",
+    "PlannerOutput",
+    "CoderOutput",
+    "DebuggerOutput",
+    "ReviewerOutput",
+    "FinalizationResult",
+    "parse_structured_output",
+    "RelevantFileContext",
+    "RepositoryContext",
+]

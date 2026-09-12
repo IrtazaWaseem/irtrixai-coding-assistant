@@ -1,3 +1,4 @@
+from pathlib import Path
 from typing import Any, TypedDict
 
 from app.schemas.agent_contracts import (
@@ -10,116 +11,159 @@ from app.schemas.agent_contracts import (
 
 MAX_REPAIR_ITERATIONS = 3
 
+SENSITIVE_KEY_TERMS = (
+    "api_key",
+    "secret",
+    "token",
+    "password",
+    "credential",
+    "private_key",
+)
 
-class AgentState(TypedDict, total=False):
-    """Explicitly typed workflow state for IrtrixAI LangGraph engine."""
 
-    # 1. Persisted execution context
+class AgentState(TypedDict):
     task_id: str
     workspace_path: str
     thread_id: str
     messages: list[dict[str, Any]]
     workspace_summary: str | None
     tech_stack: list[str]
-    current_step: int
-    repair_count: int
-    error: str | None
-    final_result: FinalizationResult | None
-
-    # 2. Model-generated proposals (Non-authoritative DTOs)
-    plan: PlannerOutput | None
-    coder_proposal: CoderOutput | None
-    debugger_output: DebuggerOutput | None
-
-    # 3. Tool results (Filesystem & execution facts)
-    tool_result: dict[str, Any] | None
+    repository_context: dict[str, Any] | None  # Day 9 Context Layer
+    plan: PlannerOutput | dict[str, Any] | None
+    coder_proposal: CoderOutput | dict[str, Any] | None
     pending_patch: str | None
+    approval: bool | None
+    feedback: str | None
     applied_diff: str | None
     test_command: str | None
     test_result: dict[str, Any] | None
-
-    # 4. Human-in-the-loop governance
-    approval: bool | None
-    feedback: str | None
-    review_summary: ReviewerOutput | None
+    tool_result: dict[str, Any] | None
+    debugger_output: DebuggerOutput | dict[str, Any] | None
+    repair_count: int
+    review_summary: ReviewerOutput | dict[str, Any] | None
+    final_result: FinalizationResult | dict[str, Any] | None
+    error: str | None
+    current_step: int
 
 
 def create_initial_state(
     task_id: str,
     workspace_path: str,
     thread_id: str,
-    *,
-    prompt: str | None = None,
+    prompt: str = "",
 ) -> AgentState:
-    """Creates a deterministic, clean initial agent state."""
-    messages: list[dict[str, Any]] = []
-    if prompt and prompt.strip():
-        messages.append({"role": "user", "content": prompt.strip()})
-
-    return AgentState(
-        task_id=str(task_id).strip(),
-        workspace_path=str(workspace_path).strip(),
-        thread_id=str(thread_id).strip(),
-        messages=messages,
-        workspace_summary=None,
-        tech_stack=[],
-        current_step=0,
-        repair_count=0,
-        error=None,
-        final_result=None,
-        plan=None,
-        coder_proposal=None,
-        debugger_output=None,
-        tool_result=None,
-        pending_patch=None,
-        applied_diff=None,
-        test_command=None,
-        test_result=None,
-        approval=None,
-        feedback=None,
-        review_summary=None,
-    )
+    return {
+        "task_id": task_id,
+        "workspace_path": workspace_path,
+        "thread_id": thread_id,
+        "messages": [{"role": "user", "content": prompt}] if prompt else [],
+        "workspace_summary": None,
+        "tech_stack": [],
+        "repository_context": None,  # Day 9 Context Layer
+        "plan": None,
+        "coder_proposal": None,
+        "pending_patch": None,
+        "approval": None,
+        "feedback": None,
+        "applied_diff": None,
+        "test_command": None,
+        "test_result": None,
+        "tool_result": None,
+        "debugger_output": None,
+        "repair_count": 0,
+        "review_summary": None,
+        "final_result": None,
+        "error": None,
+        "current_step": 0,
+    }
 
 
-def validate_state_invariants(state: AgentState) -> None:
-    """Asserts runtime invariants: thread continuity, repair limits, and secret isolation."""
+def validate_state_invariants(state: AgentState | dict[str, Any]) -> bool:
+    """Validates critical security, graph, and thread state invariants."""
+    if not isinstance(state, dict):
+        raise ValueError("State must be a dictionary or Mapping.")
+
+    # 1. Thread Invariants
     thread_id = state.get("thread_id")
-    if not thread_id or not str(thread_id).strip():
-        raise ValueError("Graph invariant violated: thread_id must be non-empty.")
+    if not thread_id or not isinstance(thread_id, str) or not thread_id.strip():
+        raise ValueError("thread_id must be non-empty.")
 
-    repair_count = state.get("repair_count", 0)
-    if repair_count < 0:
-        raise ValueError("Graph invariant violated: repair_count cannot be negative.")
-    if repair_count > MAX_REPAIR_ITERATIONS:
+    # 2. Task & Workspace Identity Invariants
+    task_id = state.get("task_id")
+    if not task_id or not isinstance(task_id, str) or not task_id.strip():
+        raise ValueError("task_id must be non-empty.")
+
+    workspace_path = state.get("workspace_path")
+    if (
+        not workspace_path
+        or not isinstance(workspace_path, str)
+        or not workspace_path.strip()
+    ):
+        raise ValueError("workspace_path must be non-empty.")
+
+    # Security: Workspace boundary & traversal protection
+    norm_ws = str(workspace_path).replace("\\", "/")
+    if (
+        ".." in Path(workspace_path).parts
+        or "/../" in norm_ws
+        or norm_ws.startswith("../")
+        or norm_ws == ".."
+    ):
         raise ValueError(
-            f"Graph invariant violated: repair_count ({repair_count}) "
-            f"exceeds MAX_REPAIR_ITERATIONS ({MAX_REPAIR_ITERATIONS})."
+            "Security invariant violated: workspace_path contains path traversal ('..')."
         )
 
-    err_val = state.get("error")
-    if err_val and isinstance(err_val, str):
-        from app.core.config import settings
-
-        for secret in (
-            settings.GEMINI_API_KEY,
-            settings.GROQ_API_KEY,
-            settings.POSTGRES_PASSWORD,
+    # Security: Secret & credential leak protection
+    for k, v in state.items():
+        k_lower = str(k).lower()
+        if any(term in k_lower for term in SENSITIVE_KEY_TERMS):
+            raise ValueError(f"Security violation: state contains sensitive key '{k}'.")
+        if isinstance(v, str) and any(
+            term in v.lower() for term in ("aizasy", "bearer ")
         ):
-            if secret and len(secret) >= 4 and secret in err_val:
-                raise ValueError("Security violation: Secret leaked in error message.")
-
-    # Invariant: No live network clients or API secrets stored directly in graph state
-    for key, value in state.items():
-        if "api_key" in key.lower() or "secret" in key.lower():
             raise ValueError(
-                f"Security violation: Secret key '{key}' cannot be persisted in graph state."
+                f"Security violation: state contains sensitive secret in '{k}'."
             )
-        # Verify no open network/database/client handles
-        type_name = type(value).__name__.lower()
-        if any(
-            bad in type_name
-            for bad in ("session", "client", "socket", "engine", "connection")
-        ):
-            raise TypeError(
-                f"State serialization violation: Field '{key}' contains live handle '{type_name}'."
-            )
+
+    # 3. Repair Count Governance (0 <= repair_count <= MAX_REPAIR_ITERATIONS)
+    repair_count = state.get("repair_count", 0)
+    if not isinstance(repair_count, int) or isinstance(repair_count, bool):
+        raise ValueError("repair_count must be an integer.")
+    if repair_count < 0:
+        raise ValueError("repair_count cannot be negative.")
+    if repair_count > MAX_REPAIR_ITERATIONS:
+        raise ValueError(
+            f"repair_count ({repair_count}) exceeds MAX_REPAIR_ITERATIONS ({MAX_REPAIR_ITERATIONS})."
+        )
+
+    # 4. Security & Patch Authorization Invariant
+    applied_diff = state.get("applied_diff")
+    approval = state.get("approval")
+    if applied_diff and approval is not True:
+        raise ValueError(
+            "Security invariant violated: applied_diff cannot exist without explicit human approval (approval=True)."
+        )
+
+    if approval is not None and not isinstance(approval, bool):
+        raise ValueError("approval must be a boolean or None.")
+
+    # 5. Step boundary invariant
+    current_step = state.get("current_step", 0)
+    if (
+        current_step is not None
+        and not isinstance(current_step, int)
+        or isinstance(current_step, bool)
+    ):
+        raise ValueError("current_step must be an integer.")
+    if current_step is not None and (current_step < 0 or current_step > 8):
+        raise ValueError("current_step must be between 0 and 8.")
+
+    return True
+
+
+__all__ = [
+    "MAX_REPAIR_ITERATIONS",
+    "AgentState",
+    "create_initial_state",
+    "validate_state_invariants",
+]
