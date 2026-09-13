@@ -25,7 +25,6 @@ SAFE_GIT_ENV = {
 
 
 def _run_git(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess:
-    """Executes a git command with retries to gracefully handle Windows Defender file-locking."""
     max_retries = 3
     for attempt in range(max_retries):
         try:
@@ -47,7 +46,6 @@ def _run_git(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess:
 
 
 def init_test_git_repo(repo_path: Path) -> None:
-    """Initializes local git repository with Windows-optimized anti-locking flags."""
     _run_git(["git", "--no-pager", "init"], repo_path)
     _run_git(["git", "--no-pager", "config", "user.name", "TestRunner"], repo_path)
     _run_git(
@@ -128,7 +126,7 @@ async def test_unresolved_hitl_interrupt_never_mutates_filesystem(tmp_path: Path
     )
     mock_gw = MagicMock(spec=LLMGateway)
 
-    async def mock_generate_structured(prompt, response_schema, **kwargs):
+    async def mock_structured(prompt, response_schema, **kwargs):
         if response_schema is PlannerOutput:
             return PlannerOutput(
                 summary="Plan endpoint fix",
@@ -141,7 +139,7 @@ async def test_unresolved_hitl_interrupt_never_mutates_filesystem(tmp_path: Path
             files_changed=["endpoint.py"],
         )
 
-    mock_gw.generate_structured = AsyncMock(side_effect=mock_generate_structured)
+    mock_gw.generate_structured = AsyncMock(side_effect=mock_structured)
     set_llm_gateway(mock_gw)
 
     graph = build_agent_graph()
@@ -279,7 +277,7 @@ async def test_checkpoint_resume_then_apply_patch_lifecycle(tmp_path: Path):
     )
     mock_gw = MagicMock(spec=LLMGateway)
 
-    async def mock_generate_structured(prompt, response_schema, **kwargs):
+    async def mock_structured(prompt, response_schema, **kwargs):
         if response_schema is PlannerOutput:
             return PlannerOutput(
                 summary="Plan feature",
@@ -302,7 +300,7 @@ async def test_checkpoint_resume_then_apply_patch_lifecycle(tmp_path: Path):
             )
         return response_schema.model_validate({})
 
-    mock_gw.generate_structured = AsyncMock(side_effect=mock_generate_structured)
+    mock_gw.generate_structured = AsyncMock(side_effect=mock_structured)
     set_llm_gateway(mock_gw)
 
     thread_id = "thread-chk-patch-apply"
@@ -521,3 +519,55 @@ async def test_multi_file_patch_duplicate_target_rejected(tmp_path: Path):
     assert res["applied_diff"] is None
     assert "duplicate" in res["error"].lower()
     assert dup_file.read_text(encoding="utf-8") == initial_dup
+
+
+@pytest.mark.asyncio
+async def test_apply_approved_patch_resume_after_partial_write_fails_closed(
+    tmp_path: Path,
+):
+    """Verifies apply_approved_patch fails closed without corrupting files when re-executed on an already-modified file."""
+    target_file = tmp_path / "calc.py"
+    other_file = tmp_path / "other.py"
+    initial_code = "def add(a, b):\n    return a - b\n"
+    other_code = "UNTOUCHED = True\n"
+    target_file.write_text(initial_code, encoding="utf-8")
+    other_file.write_text(other_code, encoding="utf-8")
+    init_test_git_repo(tmp_path)
+
+    patch_text = (
+        "--- a/calc.py\n+++ b/calc.py\n@@ -1,2 +1,2 @@\n"
+        " def add(a, b):\n-    return a - b\n+    return a + b\n"
+    )
+
+    state1 = create_initial_state("task-resume-fail", str(tmp_path), "thread-rf1")
+    state1["pending_patch"] = patch_text
+    state1["approval"] = True
+
+    res1 = await apply_approved_patch(state1)
+    assert res1["error"] is None
+    assert res1["applied_diff"] is not None
+    modified_code = target_file.read_text(encoding="utf-8")
+    assert modified_code == "def add(a, b):\n    return a + b\n"
+
+    state_resume = create_initial_state("task-resume-fail", str(tmp_path), "thread-rf1")
+    state_resume["pending_patch"] = patch_text
+    state_resume["approval"] = True
+
+    res2 = await apply_approved_patch(state_resume)
+
+    assert res2["applied_diff"] is None
+    assert res2["tool_result"]["success"] is False
+    assert res2["error"] is not None
+    assert "Patch application failed" in res2["error"]
+
+    assert target_file.read_text(encoding="utf-8") == modified_code
+    assert other_file.read_text(encoding="utf-8") == other_code
+
+    serialized = json.dumps(res2, default=str)
+    assert "applied_diff" in serialized
+
+    from app.agent.nodes import finalize
+
+    state_resume.update(res2)
+    fin_res = await finalize(state_resume)
+    assert fin_res["final_result"].status == "failed"
