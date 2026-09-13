@@ -1,0 +1,20 @@
+version: "3.8"
+
+services:
+  test-postgres:
+    image: postgres:16-alpine
+    container_name: irtrixai-test-postgres
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: test_secure_password_123
+      POSTGRES_DB: irtrixai_test
+    ports:
+      - "15432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d irtrixai_test"]
+      interval: 2s
+      timeout: 2s
+      retries: 10
+    tmpfs:
+      - /var/lib/postgresql/data

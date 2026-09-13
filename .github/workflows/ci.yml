@@ -1,0 +1,176 @@
+name: CI Pipeline & Security Gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  job-a-unit-tests:
+    name: Job A — Fast Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e "backend/[dev]"
+
+      - name: Run Ruff Linter
+        run: |
+          cd backend
+          ruff check .
+
+      - name: Run Fast Unit Tests
+        run: |
+          cd backend
+          python -m pytest tests/ -m "not integration and not docker and not postgres and not multiworker" -v
+
+  job-b-postgres-integration:
+    name: Job B — PostgreSQL 16 Concurrency & Checkpointing
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: test_secure_password_123
+          POSTGRES_DB: irtrixai_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d irtrixai_test"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e "backend/[dev]"
+
+      - name: Run Database Migrations
+        env:
+          POSTGRES_HOST: localhost
+          POSTGRES_PORT: 5432
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: test_secure_password_123
+          POSTGRES_DB: irtrixai_test
+        run: |
+          cd backend
+          alembic upgrade head
+
+      - name: Run PostgreSQL Integration Tests
+        env:
+          POSTGRES_HOST: localhost
+          POSTGRES_PORT: 5432
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: test_secure_password_123
+          POSTGRES_DB: irtrixai_test
+        run: |
+          cd backend
+          python -m pytest tests/test_postgres_concurrency.py tests/test_postgres_checkpoint_recovery.py -v
+
+  job-c-docker-security:
+    name: Job C — Real Docker Sandbox Security Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e "backend/[dev]"
+
+      - name: Build Sandbox Docker Image
+        run: |
+          docker build -t irtrixai-sandbox:latest -f docker/sandbox.Dockerfile docker/
+
+      - name: Run Real Docker Security Tests
+        run: |
+          cd backend
+          python -m pytest tests/test_sandbox.py tests/test_agent_sandbox_repair.py -m docker -v
+
+  job-d-security-gate:
+    name: Job D — Security Gate & Multi-Worker Validation
+    needs: [job-a-unit-tests, job-b-postgres-integration, job-c-docker-security]
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: test_secure_password_123
+          POSTGRES_DB: irtrixai_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d irtrixai_test"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e "backend/[dev]"
+
+      - name: Build Sandbox Image
+        run: |
+          docker build -t irtrixai-sandbox:latest -f docker/sandbox.Dockerfile docker/
+
+      - name: Run Multi-Worker Concurrency Smoke Test
+        env:
+          POSTGRES_HOST: localhost
+          POSTGRES_PORT: 5432
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: test_secure_password_123
+          POSTGRES_DB: irtrixai_test
+        run: |
+          cd backend
+          alembic upgrade head
+          python -m pytest tests/test_multiworker_smoke.py -v
+
+      - name: Run Complete Full-Tier Regression
+        env:
+          POSTGRES_HOST: localhost
+          POSTGRES_PORT: 5432
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: test_secure_password_123
+          POSTGRES_DB: irtrixai_test
+        run: |
+          cd backend
+          python -m pytest tests/ -v
+          ruff check .
