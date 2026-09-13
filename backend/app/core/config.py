@@ -35,7 +35,7 @@ class Settings(BaseSettings):
         "postgresql+asyncpg://irtrixai:irtrixai_dev_password@localhost:5432/irtrixai_db"
     )
 
-    # LLM Providers & Gateway Configuration (Day 4)
+    # LLM Providers & Gateway Configuration
     PRIMARY_LLM_PROVIDER: str = "ollama"
     PRIMARY_LLM_MODEL: str = "qwen-gpu-tuned"
     FALLBACK_LLM_PROVIDER: str | None = None

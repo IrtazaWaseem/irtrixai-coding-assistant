@@ -25,7 +25,7 @@ from app.services.task_service import TaskService
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-# Active in-flight task execution tracker for fast concurrency rejection (Finding 2)
+# Active in-flight task execution tracker for fast concurrency rejection
 _running_tasks: set[str] = set()
 
 
@@ -79,7 +79,6 @@ async def run_task(
             message="Checkpointer is not initialized.",
         )
 
-    # In-process concurrency guard: reject duplicate simultaneous invocations with 409 Conflict
     if task_id in _running_tasks:
         raise AppException(
             status_code=409,
@@ -338,7 +337,6 @@ async def stream_task_events(
                     },
                 )
 
-            # Day 9 SSE Observation Event
             if snap.values.get("repository_context"):
                 rc = snap.values.get("repository_context") or {}
                 yield _format_sse(

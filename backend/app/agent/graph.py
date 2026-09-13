@@ -13,7 +13,7 @@ from app.agent.nodes import (
     finalize,
     inspect_workspace,
     planner,
-    repository_context,  # Day 9 Node
+    repository_context,
     reviewer,
     test_runner,
 )
@@ -61,7 +61,7 @@ def build_agent_graph(checkpointer: BaseCheckpointSaver | None = None):
 
     # Canonical 10 Nodes
     builder.add_node("inspect_workspace", inspect_workspace)
-    builder.add_node("repository_context", repository_context)  # Day 9 Node
+    builder.add_node("repository_context", repository_context)
     builder.add_node("planner", planner)
     builder.add_node("coder", coder)
     builder.add_node("approval_gate", approval_gate)
@@ -73,8 +73,8 @@ def build_agent_graph(checkpointer: BaseCheckpointSaver | None = None):
 
     # Workflow Spine
     builder.add_edge(START, "inspect_workspace")
-    builder.add_edge("inspect_workspace", "repository_context")  # Day 9 Spine
-    builder.add_edge("repository_context", "planner")  # Day 9 Spine
+    builder.add_edge("inspect_workspace", "repository_context")
+    builder.add_edge("repository_context", "planner")
     builder.add_edge("planner", "coder")
     builder.add_edge("coder", "approval_gate")
 
@@ -110,11 +110,7 @@ def build_agent_graph(checkpointer: BaseCheckpointSaver | None = None):
     builder.add_edge("reviewer", "finalize")
     builder.add_edge("finalize", END)
 
-    effective_checkpointer = (
-        checkpointer
-        if checkpointer is not None
-        else MemorySaver()  # Fallback for offline unit tests
-    )
+    effective_checkpointer = checkpointer if checkpointer is not None else MemorySaver()
 
     return builder.compile(checkpointer=effective_checkpointer)
 

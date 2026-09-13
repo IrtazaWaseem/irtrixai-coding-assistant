@@ -3,7 +3,7 @@ import re
 from enum import Enum
 from typing import Any, TypeVar
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -27,9 +27,35 @@ class PlannerOutput(BaseModel):
     steps: list[str] = Field(
         ..., min_length=1, description="Concrete implementation sequence"
     )
+    objective: str = Field(
+        default="", description="Specific user-requested outcome and functional goal"
+    )
     plan_id: str | None = Field(default=None, description="Optional plan identifier")
     files_expected: list[str] = Field(
         default_factory=list, description="Target workspace paths"
+    )
+    affected_files: list[str] = Field(
+        default_factory=list, description="Files directly targeted for modification"
+    )
+    supporting_files: list[str] = Field(
+        default_factory=list,
+        description="Reference or context files inspected but not modified",
+    )
+    test_strategy: str = Field(
+        default="",
+        description="Strategy for verifying the change: existing tests to run or new tests to add",
+    )
+    tests_to_run_or_add: list[str] = Field(
+        default_factory=list,
+        description="Test files or commands to execute to verify behavior",
+    )
+    out_of_scope: list[str] = Field(
+        default_factory=list,
+        description="Related components, files, or refactors explicitly avoided",
+    )
+    minimality_rationale: str = Field(
+        default="",
+        description="Justification for why this is the smallest correct change",
     )
     risk_notes: list[str] = Field(
         default_factory=list, description="Risk considerations"
@@ -55,6 +81,17 @@ class PlannerOutput(BaseModel):
                 raise ValueError("steps cannot contain empty or blank items")
         return v
 
+    @model_validator(mode="after")
+    def sync_planner_fields(self) -> "PlannerOutput":
+        if self.affected_files and not self.files_expected:
+            self.files_expected = list(self.affected_files)
+        elif self.files_expected and not self.affected_files:
+            self.affected_files = list(self.files_expected)
+
+        if not self.objective and self.summary:
+            self.objective = self.summary
+        return self
+
 
 class CoderOutput(BaseModel):
     summary: str = Field(
@@ -63,6 +100,17 @@ class CoderOutput(BaseModel):
     patch: str = Field(default="", description="Standard unified diff or patch block")
     files_changed: list[str] = Field(
         default_factory=list, description="List of workspace-relative paths"
+    )
+    explanation: str = Field(
+        default="", description="Technical rationale for the proposed implementation"
+    )
+    is_minimal: bool = Field(
+        default=True,
+        description="Whether the proposed patch adheres strictly to minimal changes",
+    )
+    tests_modified: list[str] = Field(
+        default_factory=list,
+        description="Test files created or modified in the proposal",
     )
 
     @field_validator("summary")
@@ -76,12 +124,41 @@ class CoderOutput(BaseModel):
 class DebuggerOutput(BaseModel):
     diagnosis: str = Field(..., description="Root cause of test failure")
     proposed_fix: str = Field(..., description="Actionable fix direction for the Coder")
+    symptom: str = Field(
+        default="", description="Observed test failure symptom and failing assertions"
+    )
+    root_cause: str = Field(
+        default="", description="Underlying technical defect causing the failure"
+    )
+    evidence: str = Field(
+        default="", description="Key stack traces, error lines, or log evidence"
+    )
+    repair_strategy: str = Field(
+        default="",
+        description="Targeted, minimal repair direction without collateral changes",
+    )
+    regression_risk: str = Field(
+        default="", description="Existing functionality that must be preserved"
+    )
     files_to_change: list[str] = Field(
         default_factory=list, description="Files requiring repair"
     )
     reproduction_command: str | None = Field(
         default=None, description="Command to reproduce test failure"
     )
+
+    @model_validator(mode="after")
+    def sync_debugger_fields(self) -> "DebuggerOutput":
+        if not self.root_cause and self.diagnosis:
+            self.root_cause = self.diagnosis
+        elif not self.diagnosis and self.root_cause:
+            self.diagnosis = self.root_cause
+
+        if not self.repair_strategy and self.proposed_fix:
+            self.repair_strategy = self.proposed_fix
+        elif not self.proposed_fix and self.repair_strategy:
+            self.proposed_fix = self.repair_strategy
+        return self
 
 
 class ReviewerOutput(BaseModel):
@@ -129,7 +206,6 @@ def parse_structured_output(text: Any, schema: type[T]) -> T:
         raise ValueError(f"Validation error for {schema.__name__}: {e}") from e
 
 
-# Day 9 Context Layer Schemas
 class RelevantFileContext(BaseModel):
     path: str = Field(..., description="Workspace-relative path of the relevant file")
     relevance_score: float = Field(

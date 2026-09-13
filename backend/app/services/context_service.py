@@ -290,7 +290,7 @@ def build_repository_context(
         f_name = Path(f_lower).name
         f_stem = Path(f_lower).stem
 
-        # A. Explicit path, filename, or component stem mention in user prompt
+        # Explicit path, filename, or component stem mention in user prompt
         if f_lower in prompt_lower or f_name in prompt_lower:
             score += 10.0
             reasons.append(f"Referenced directly in prompt ('{f_name}')")
@@ -298,7 +298,7 @@ def build_repository_context(
             score += 8.0
             reasons.append(f"Component stem referenced in prompt ('{f_stem}')")
 
-        # B. Keyword match in path or filename
+        # Keyword match in path or filename
         for kw in keywords:
             if kw in f_name:
                 score += 4.0
@@ -310,14 +310,14 @@ def build_repository_context(
                 score += 1.5
                 reasons.append(f"Path contains keyword '{kw}'")
 
-        # C. Search content matches
+        # Search content matches
         if f in search_match_map or f_name in search_match_map:
             matches = search_match_map.get(f) or search_match_map.get(f_name, [])
             match_cnt = len(matches)
             score += min(match_cnt * 2.0, 6.0)
             reasons.append(f"Contains {match_cnt} search match(es)")
 
-        # D. Test / Source relationship
+        # Test / Source relationship
         is_test = (
             f_name.startswith("test_")
             or f_name.endswith(("_test.py", ".test.ts", ".spec.ts"))
@@ -334,7 +334,7 @@ def build_repository_context(
                     reasons.append(f"Test file for component '{base_target}'")
                     break
 
-        # E. Project manifest relevance
+        # Project manifest relevance
         if f_name in (
             "pyproject.toml",
             "package.json",
@@ -392,7 +392,6 @@ def build_repository_context(
         else:
             content = str(read_res.output)
 
-        # Slice lines in Python to respect limits without keyword argument discrepancies
         lines = content.splitlines()
         file_truncated = False
         if len(lines) > max_excerpt_lines:
@@ -401,7 +400,6 @@ def build_repository_context(
 
         content_bytes = len(content.encode("utf-8"))
 
-        # Enforce per-file byte limit
         if content_bytes > max_file_bytes:
             trunc_raw = truncate_output(content, max_bytes=max_file_bytes)
             content = (
@@ -411,7 +409,6 @@ def build_repository_context(
             file_truncated = True
             overall_truncated = True
 
-        # Enforce total context byte limit
         if total_context_bytes + content_bytes > max_total_bytes:
             available = max(0, max_total_bytes - total_context_bytes)
             if available > 100:

@@ -28,7 +28,7 @@ class AgentState(TypedDict):
     messages: list[dict[str, Any]]
     workspace_summary: str | None
     tech_stack: list[str]
-    repository_context: dict[str, Any] | None  # Day 9 Context Layer
+    repository_context: dict[str, Any] | None
     plan: PlannerOutput | dict[str, Any] | None
     coder_proposal: CoderOutput | dict[str, Any] | None
     pending_patch: str | None
@@ -59,7 +59,7 @@ def create_initial_state(
         "messages": [{"role": "user", "content": prompt}] if prompt else [],
         "workspace_summary": None,
         "tech_stack": [],
-        "repository_context": None,  # Day 9 Context Layer
+        "repository_context": None,
         "plan": None,
         "coder_proposal": None,
         "pending_patch": None,
@@ -101,7 +101,6 @@ def validate_state_invariants(state: AgentState | dict[str, Any]) -> bool:
     ):
         raise ValueError("workspace_path must be non-empty.")
 
-    # Security: Workspace boundary & traversal protection
     norm_ws = str(workspace_path).replace("\\", "/")
     if (
         ".." in Path(workspace_path).parts
@@ -113,7 +112,6 @@ def validate_state_invariants(state: AgentState | dict[str, Any]) -> bool:
             "Security invariant violated: workspace_path contains path traversal ('..')."
         )
 
-    # Security: Secret & credential leak protection
     for k, v in state.items():
         k_lower = str(k).lower()
         if any(term in k_lower for term in SENSITIVE_KEY_TERMS):
@@ -125,7 +123,7 @@ def validate_state_invariants(state: AgentState | dict[str, Any]) -> bool:
                 f"Security violation: state contains sensitive secret in '{k}'."
             )
 
-    # 3. Repair Count Governance (0 <= repair_count <= MAX_REPAIR_ITERATIONS)
+    # 3. Repair Count Governance
     repair_count = state.get("repair_count", 0)
     if not isinstance(repair_count, int) or isinstance(repair_count, bool):
         raise ValueError("repair_count must be an integer.")
