@@ -1,8 +1,12 @@
-import asyncio
-import sys
+import pytest
+from sqlalchemy.ext.asyncio import AsyncEngine
 
-if sys.platform == "win32":
-    try:
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-    except Exception:
-        pass
+from app.db.session import engine
+
+
+@pytest.fixture(autouse=True)
+async def reset_db_engine():
+    """Ensures database engine state is fresh across async test loops."""
+    yield
+    if isinstance(engine, AsyncEngine):
+        await engine.dispose()

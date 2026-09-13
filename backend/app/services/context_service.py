@@ -160,6 +160,7 @@ def build_repository_context(
     max_total_bytes: int | None = None,
     max_excerpt_lines: int | None = None,
     max_search_results: int | None = None,
+    max_candidates: int | None = None,
 ) -> RepositoryContext:
     """Deterministically assembles bounded repository context without using LLM retrieval."""
     max_files = max_files or getattr(settings, "MAX_CONTEXT_FILES", 6)
@@ -173,6 +174,7 @@ def build_repository_context(
     max_search_results = max_search_results or getattr(
         settings, "MAX_SEARCH_RESULTS", 15
     )
+    max_candidates = max_candidates or getattr(settings, "MAX_CANDIDATE_FILES", 1_000)
 
     tech_stack = tech_stack or ["python"]
 
@@ -226,7 +228,28 @@ def build_repository_context(
         ):
             eligible_files.append(norm_f)
 
+    # Candidate evaluation cap: sort deterministically and bound processing
+    eligible_files.sort()
     keywords = extract_task_keywords(task_prompt)
+
+    if len(eligible_files) > max_candidates:
+        prompt_lower = task_prompt.lower()
+        priority_files: list[str] = []
+        regular_files: list[str] = []
+
+        for f in eligible_files:
+            f_lower = f.lower()
+            f_name = Path(f_lower).name
+            if (
+                f_name in ("pyproject.toml", "package.json", "cargo.toml", "go.mod")
+                or f_name in prompt_lower
+                or any(k in f_name for k in keywords)
+            ):
+                priority_files.append(f)
+            else:
+                regular_files.append(f)
+
+        eligible_files = (priority_files + regular_files)[:max_candidates]
 
     # 2. Content search matches for top keywords
     search_match_map: dict[str, list[int]] = {}
@@ -337,7 +360,7 @@ def build_repository_context(
         if len(selected_ranked) >= max_files:
             break
 
-    # 4. Gather bounded excerpts using safe read_file (positional path only)
+    # 4. Gather bounded excerpts using safe read_file
     relevant_files: list[RelevantFileContext] = []
     total_context_bytes = 0
     overall_truncated = False
@@ -369,7 +392,7 @@ def build_repository_context(
         else:
             content = str(read_res.output)
 
-        # Slice lines in Python to avoid keyword argument incompatibilities
+        # Slice lines in Python to respect limits without keyword argument discrepancies
         lines = content.splitlines()
         file_truncated = False
         if len(lines) > max_excerpt_lines:

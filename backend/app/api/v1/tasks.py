@@ -25,7 +25,7 @@ from app.services.task_service import TaskService
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-# Active in-flight task execution tracker for concurrency protection (Finding 2)
+# Active in-flight task execution tracker for fast concurrency rejection (Finding 2)
 _running_tasks: set[str] = set()
 
 
@@ -79,7 +79,7 @@ async def run_task(
             message="Checkpointer is not initialized.",
         )
 
-    # Concurrency guard: reject concurrent /run executions on the same task with 409
+    # In-process concurrency guard: reject duplicate simultaneous invocations with 409 Conflict
     if task_id in _running_tasks:
         raise AppException(
             status_code=409,

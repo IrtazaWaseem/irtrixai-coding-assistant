@@ -69,6 +69,7 @@ class Settings(BaseSettings):
     MAX_FILE_CONTEXT_BYTES: int = 8_000
     MAX_TOTAL_CONTEXT_BYTES: int = 30_000
     MAX_EXCERPT_LINES: int = 80
+    MAX_CANDIDATE_FILES: int = 1_000
 
     # Day 3 Docker Sandbox Execution Settings
     DOCKER_SANDBOX_IMAGE: str = "irtrixai-sandbox:latest"

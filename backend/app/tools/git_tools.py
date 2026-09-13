@@ -5,224 +5,274 @@ from pathlib import Path
 from app.core.config import settings
 from app.core.exceptions import (
     EntityNotFoundException,
-    ExecutionTimeoutException,
+    SecurityViolationException,
     ToolExecutionException,
 )
 from app.tools.base import ToolResult
-from app.tools.schemas import GitStagedItem, GitStatusOutput
 from app.tools.validators import (
     truncate_output,
     validate_safe_path,
     validate_workspace_dir,
 )
 
-
-def _handle_git_error(
-    tool_name: str,
-    exc: Exception,
-    raise_on_error: bool,
-    metadata: dict | None = None,
-) -> ToolResult:
-    if raise_on_error:
-        raise exc
-    meta = metadata or {}
-    meta["error_type"] = type(exc).__name__
-    if hasattr(exc, "details"):
-        meta["details"] = exc.details
-    return ToolResult.fail(tool_name=tool_name, error=str(exc), metadata=meta)
-
-
-def _execute_git_cmd(
-    cmd: list[str],
-    workspace_root: Path,
-    timeout_seconds: int | None = None,
-) -> tuple[int, str, str]:
-    """Deterministically executes a pre-tokenized Git command without shell=True."""
-    if timeout_seconds is None:
-        timeout_seconds = settings.COMMAND_TIMEOUT_SECONDS
-
-    env = {
-        **os.environ,
-        "GIT_TERMINAL_PROMPT": "0",
-        "LC_ALL": "C",
-    }
-    try:
-        proc = subprocess.run(
-            cmd,
-            cwd=str(workspace_root),
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=timeout_seconds,
-            env=env,
-        )
-        return proc.returncode, proc.stdout, proc.stderr
-    except subprocess.TimeoutExpired as err:
-        raise ExecutionTimeoutException(
-            timeout_seconds=timeout_seconds, command=" ".join(cmd)
-        ) from err
-
-
-def _verify_git_repo(base_dir: Path) -> None:
-    """Verifies that the target workspace root is an initialized Git repository."""
-    code, stdout, stderr = _execute_git_cmd(
-        ["git", "-C", str(base_dir), "rev-parse", "--is-inside-work-tree"],
-        workspace_root=base_dir,
-    )
-    if code != 0 or stdout.strip() != "true":
-        raise ToolExecutionException(
-            f"Workspace '{base_dir.name}' is not a Git repository.",
-            details={"workspace": base_dir.name, "error": stderr.strip()},
-        )
+SAFE_GIT_ENV = {
+    **os.environ,
+    "GIT_TERMINAL_PROMPT": "0",
+    "GIT_PAGER": "cat",
+    "PAGER": "cat",
+    "GIT_OPTIONAL_LOCKS": "0",
+}
 
 
 def git_status(
-    workspace_root: str | Path | None = None,
+    directory: str | None = None,
+    workspace_root: Path | str | None = None,
     raise_on_error: bool = False,
 ) -> ToolResult:
-    """Returns status information about modified, untracked, deleted, and staged files."""
+    """Executes non-interactive git status and returns structured status dictionary with branch and staged details."""
     try:
-        base_dir = validate_workspace_dir(workspace_root)
-        _verify_git_repo(base_dir)
+        ws_dir = validate_workspace_dir(workspace_root)
+        target_dir = ws_dir
+        if directory:
+            target_dir = validate_safe_path(ws_dir, directory)
 
-        code, stdout, stderr = _execute_git_cmd(
-            ["git", "-C", str(base_dir), "status", "--porcelain=v1", "-b"],
-            workspace_root=base_dir,
-        )
-        if code != 0:
-            raise ToolExecutionException(
-                f"git status failed: {stderr.strip() or stdout.strip()}"
+        if not (target_dir / ".git").is_dir() and not (ws_dir / ".git").is_dir():
+            err_msg = f"Directory '{target_dir}' is not a git repository."
+            if raise_on_error:
+                raise ToolExecutionException(err_msg)
+            return ToolResult(
+                tool_name="git_status",
+                success=False,
+                error=err_msg,
             )
 
-        lines = stdout.splitlines()
-        branch = "HEAD"
-        modified: list[str] = []
-        untracked: list[str] = []
-        deleted: list[str] = []
-        staged: list[GitStagedItem] = []
+        # Get current branch
+        branch_res = subprocess.run(
+            ["git", "--no-pager", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=str(target_dir),
+            capture_output=True,
+            text=True,
+            timeout=5,
+            stdin=subprocess.DEVNULL,
+            env=SAFE_GIT_ENV,
+        )
+        branch = branch_res.stdout.strip() if branch_res.returncode == 0 else "main"
+
+        cmd = ["git", "--no-pager", "status", "--porcelain=v1"]
+        res = subprocess.run(
+            cmd,
+            cwd=str(target_dir),
+            capture_output=True,
+            text=True,
+            timeout=10,
+            stdin=subprocess.DEVNULL,
+            env=SAFE_GIT_ENV,
+        )
+
+        if res.returncode != 0:
+            err_msg = res.stderr.strip() or "Git status failed."
+            if raise_on_error:
+                raise ToolExecutionException(err_msg)
+            return ToolResult(
+                tool_name="git_status",
+                success=False,
+                error=err_msg,
+            )
+
+        lines = res.stdout.splitlines()
+        modified = []
+        untracked = []
+        deleted = []
+        staged = []
 
         for line in lines:
-            if line.startswith("## "):
-                branch_part = line[3:].split("...")[0].strip()
-                if "No commits yet on " in branch_part:
-                    branch = branch_part.replace("No commits yet on ", "").strip()
-                elif "Initial commit on " in branch_part:
-                    branch = branch_part.replace("Initial commit on ", "").strip()
-                else:
-                    branch = branch_part
+            if len(line) < 3:
                 continue
+            xy = line[:2]
+            file_path = line[3:].strip()
 
-            if len(line) < 4:
-                continue
+            # Staged files carry index status in xy[0]
+            if xy[0] in ("M", "A", "D", "R", "C"):
+                staged.append({"path": file_path, "status": xy[0]})
 
-            x, y = line[0], line[1]
-            path_str = line[3:].strip()
-            if " -> " in path_str:
-                path_str = path_str.split(" -> ")[1]
-            path_str = path_str.replace("\\", "/")
-
-            if x == "?" and y == "?":
-                untracked.append(path_str)
-                continue
-
-            if x in {"M", "A", "D", "R", "C"}:
-                staged.append(GitStagedItem(path=path_str, status=x))
-
-            if y == "M":
-                modified.append(path_str)
-            elif y == "D":
-                deleted.append(path_str)
-
-        modified = sorted(set(modified))
-        untracked = sorted(set(untracked))
-        deleted = sorted(set(deleted))
-        staged.sort(key=lambda s: (s.path, s.status))
+            # Working tree status in xy[1]
+            if xy[1] == "M":
+                modified.append(file_path)
+            elif xy[1] == "D":
+                deleted.append(file_path)
+            elif xy == "??":
+                untracked.append(file_path)
 
         is_clean = not (modified or untracked or deleted or staged)
+        status_dict = {
+            "branch": branch,
+            "is_clean": is_clean,
+            "modified": modified,
+            "untracked": untracked,
+            "deleted": deleted,
+            "staged": staged,
+        }
 
-        result_data = GitStatusOutput(
-            branch=branch,
-            is_clean=is_clean,
-            modified=modified,
-            untracked=untracked,
-            deleted=deleted,
-            staged=staged,
+        return ToolResult(
+            tool_name="git_status",
+            success=True,
+            output=status_dict,
+            metadata={"directory": str(target_dir), "is_clean": is_clean},
         )
-        return ToolResult.ok(tool_name="git_status", output=result_data.model_dump())
-    except Exception as err:  # noqa: BLE001
-        return _handle_git_error("git_status", err, raise_on_error)
+    except SecurityViolationException:
+        if raise_on_error:
+            raise
+        return ToolResult(
+            tool_name="git_status", success=False, error="Security violation detected."
+        )
+    except ToolExecutionException:
+        if raise_on_error:
+            raise
+        return ToolResult(
+            tool_name="git_status", success=False, error="Tool execution failed."
+        )
+    except Exception as err:
+        err_msg = f"git_status failed: {err}"
+        if raise_on_error:
+            raise ToolExecutionException(err_msg)
+        return ToolResult(
+            tool_name="git_status",
+            success=False,
+            error=err_msg,
+        )
 
 
 def git_diff(
     file_path: str | None = None,
-    workspace_root: str | Path | None = None,
+    cached: bool = False,
+    workspace_root: Path | str | None = None,
     raise_on_error: bool = False,
 ) -> ToolResult:
-    """Returns the unstaged working tree diff, optionally bounded to a specific file."""
+    """Executes non-interactive git diff with proper path separation, error raising, and truncation metadata."""
     try:
-        base_dir = validate_workspace_dir(workspace_root)
-        _verify_git_repo(base_dir)
+        ws_dir = validate_workspace_dir(workspace_root)
 
-        cmd = ["git", "-C", str(base_dir), "diff"]
-
-        rel_path: str | None = None
-        if file_path is not None:
-            safe_path = validate_safe_path(base_dir, file_path, must_exist=False)
-            rel_path = str(safe_path.relative_to(base_dir)).replace("\\", "/")
-
-            if not safe_path.exists():
-                code, stdout, _ = _execute_git_cmd(
-                    ["git", "-C", str(base_dir), "ls-files", "--", rel_path],
-                    workspace_root=base_dir,
-                )
-                if code != 0 or not stdout.strip():
-                    raise EntityNotFoundException("File", file_path)
-
-            cmd.extend(["--", rel_path])
-
-        code, stdout, stderr = _execute_git_cmd(cmd, workspace_root=base_dir)
-        if code != 0:
-            raise ToolExecutionException(
-                f"git diff failed: {stderr.strip() or stdout.strip()}"
+        if not (ws_dir / ".git").is_dir():
+            err_msg = f"Directory '{ws_dir}' is not a git repository."
+            if raise_on_error:
+                raise ToolExecutionException(err_msg)
+            return ToolResult(
+                tool_name="git_diff",
+                success=False,
+                error=err_msg,
             )
 
-        content, truncated = truncate_output(stdout)
-        metadata = {
-            "truncated": truncated,
-            "byte_count": len(content.encode("utf-8")),
-            "file_path": rel_path,
-        }
-        return ToolResult.ok(tool_name="git_diff", output=content, metadata=metadata)
-    except Exception as err:  # noqa: BLE001
-        return _handle_git_error("git_diff", err, raise_on_error)
-
-
-def get_diff(
-    cached: bool = False,
-    workspace_root: str | Path | None = None,
-    raise_on_error: bool = False,
-) -> ToolResult:
-    """Returns the complete unstaged diff (cached=False) or staged diff (cached=True)."""
-    try:
-        base_dir = validate_workspace_dir(workspace_root)
-        _verify_git_repo(base_dir)
-
-        cmd = ["git", "-C", str(base_dir), "diff"]
+        cmd = ["git", "--no-pager", "diff"]
         if cached:
             cmd.append("--cached")
 
-        code, stdout, stderr = _execute_git_cmd(cmd, workspace_root=base_dir)
-        if code != 0:
-            raise ToolExecutionException(
-                f"git diff failed: {stderr.strip() or stdout.strip()}"
+        if file_path:
+            norm = file_path.strip()
+            if not norm or norm == "/dev/null":
+                err_msg = f"Invalid file path: '{file_path}'"
+                if raise_on_error:
+                    raise ToolExecutionException(err_msg)
+                return ToolResult(
+                    tool_name="git_diff",
+                    success=False,
+                    error=err_msg,
+                )
+
+            safe_target = validate_safe_path(ws_dir, norm)
+            if not safe_target.exists():
+                err_msg = f"File path '{file_path}' does not exist in workspace."
+                if raise_on_error:
+                    raise EntityNotFoundException(file_path, err_msg)
+                return ToolResult(
+                    tool_name="git_diff",
+                    success=False,
+                    error=err_msg,
+                )
+
+            cmd.extend(["--", norm])
+
+        res = subprocess.run(
+            cmd,
+            cwd=str(ws_dir),
+            capture_output=True,
+            text=True,
+            timeout=10,
+            stdin=subprocess.DEVNULL,
+            env=SAFE_GIT_ENV,
+        )
+
+        if res.returncode != 0:
+            err_msg = res.stderr.strip() or "Git diff failed."
+            if raise_on_error:
+                raise ToolExecutionException(err_msg)
+            return ToolResult(
+                tool_name="git_diff",
+                success=False,
+                error=err_msg,
             )
 
-        content, truncated = truncate_output(stdout)
-        metadata = {
-            "cached": cached,
-            "truncated": truncated,
-            "byte_count": len(content.encode("utf-8")),
-        }
-        return ToolResult.ok(tool_name="get_diff", output=content, metadata=metadata)
-    except Exception as err:  # noqa: BLE001
-        return _handle_git_error("get_diff", err, raise_on_error)
+        diff_out = res.stdout
+        max_bytes = getattr(settings, "MAX_TOOL_OUTPUT_BYTES", 51_200)
+        trunc_raw = truncate_output(diff_out, max_bytes=max_bytes)
+        bounded_out = (
+            trunc_raw[0] if isinstance(trunc_raw, (tuple, list)) else str(trunc_raw)
+        )
+        is_truncated = (
+            trunc_raw[1]
+            if isinstance(trunc_raw, (tuple, list)) and len(trunc_raw) > 1
+            else (len(diff_out.encode("utf-8")) > max_bytes)
+        )
+
+        return ToolResult(
+            tool_name="git_diff",
+            success=True,
+            output=bounded_out,
+            metadata={
+                "file_path": file_path,
+                "cached": cached,
+                "truncated": is_truncated,
+            },
+        )
+    except SecurityViolationException:
+        if raise_on_error:
+            raise
+        return ToolResult(
+            tool_name="git_diff", success=False, error="Security violation detected."
+        )
+    except EntityNotFoundException:
+        if raise_on_error:
+            raise
+        return ToolResult(
+            tool_name="git_diff", success=False, error="Entity not found."
+        )
+    except ToolExecutionException:
+        if raise_on_error:
+            raise
+        return ToolResult(
+            tool_name="git_diff", success=False, error="Tool execution failed."
+        )
+    except Exception as err:
+        err_msg = f"git_diff failed: {err}"
+        if raise_on_error:
+            raise ToolExecutionException(err_msg)
+        return ToolResult(
+            tool_name="git_diff",
+            success=False,
+            error=err_msg,
+        )
+
+
+def get_diff(
+    workspace_root: Path | str | None = None,
+    file_path: str | None = None,
+    staged: bool = False,
+    cached: bool = False,
+    raise_on_error: bool = False,
+) -> ToolResult:
+    """Safely retrieves git diff with truncation metadata and error raising support."""
+    return git_diff(
+        file_path=file_path,
+        cached=(staged or cached),
+        workspace_root=workspace_root,
+        raise_on_error=raise_on_error,
+    )
