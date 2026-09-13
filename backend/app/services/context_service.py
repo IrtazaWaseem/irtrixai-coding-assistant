@@ -1,3 +1,4 @@
+# context_service.py
 import logging
 import re
 from pathlib import Path
@@ -62,6 +63,13 @@ STOP_WORDS = {
     "like",
     "using",
     "use",
+    "where",
+    "what",
+    "which",
+    "who",
+    "when",
+    "why",
+    "how",
 }
 
 CODE_EXTENSIONS = {
@@ -171,9 +179,7 @@ def build_repository_context(
         settings, "MAX_TOTAL_CONTEXT_BYTES", 30_000
     )
     max_excerpt_lines = max_excerpt_lines or getattr(settings, "MAX_EXCERPT_LINES", 80)
-    max_search_results = max_search_results or getattr(
-        settings, "MAX_SEARCH_RESULTS", 15
-    )
+    max_search_results = max_search_results or 15
     max_candidates = max_candidates or getattr(settings, "MAX_CANDIDATE_FILES", 1_000)
 
     tech_stack = tech_stack or ["python"]
@@ -251,32 +257,110 @@ def build_repository_context(
 
         eligible_files = (priority_files + regular_files)[:max_candidates]
 
-    # 2. Content search matches for top keywords
-    search_match_map: dict[str, list[int]] = {}
+    # 2. Content search matches for top keywords using corrected search_code signature
+    search_match_map: dict[str, set[int]] = {}
     search_keywords = [
         k for k in keywords if not k.endswith((".py", ".ts", ".js", ".json"))
     ][:4]
 
     for sk in search_keywords:
         try:
-            safe_pattern = re.escape(sk)
+            clean_query = str(sk).strip()
+            if not clean_query:
+                continue
             s_res = search_code(
-                pattern=safe_pattern,
-                max_results=max_search_results,
+                query=clean_query,
                 workspace_root=resolved_ws,
             )
-            if s_res.success and s_res.output and isinstance(s_res.output, dict):
-                matches = s_res.output.get("matches", [])
-                if isinstance(matches, list):
-                    for m in matches:
-                        if isinstance(m, dict) and "file" in m and "line" in m:
-                            mf = str(m["file"]).replace("\\", "/").strip()
-                            if mf.startswith("./"):
-                                mf = mf[2:]
-                            search_match_map.setdefault(mf, []).append(int(m["line"]))
+            raw_matches: list[Any] = []
+            if s_res.success and s_res.output is not None:
+                if isinstance(s_res.output, dict):
+                    raw_matches = (
+                        s_res.output.get("matches")
+                        or s_res.output.get("results")
+                        or s_res.output.get("items")
+                        or s_res.output.get("hits")
+                        or s_res.output.get("files")
+                        or []
+                    )
+                elif isinstance(s_res.output, list):
+                    raw_matches = s_res.output
+                elif hasattr(s_res.output, "matches"):
+                    raw_matches = getattr(s_res.output, "matches")
+                elif isinstance(s_res.output, str):
+                    raw_matches = [
+                        line for line in s_res.output.splitlines() if line.strip()
+                    ]
+
+            if (
+                not raw_matches
+                and hasattr(s_res, "metadata")
+                and isinstance(s_res.metadata, dict)
+            ):
+                raw_matches = s_res.metadata.get("matches", [])
+
+            if isinstance(raw_matches, list):
+                for m in raw_matches[:max_search_results]:
+                    file_val = None
+                    line_val = None
+
+                    if isinstance(m, dict):
+                        file_val = (
+                            m.get("file_path")
+                            or m.get("file")
+                            or m.get("path")
+                            or m.get("filename")
+                        )
+                        line_val = (
+                            m.get("line_number")
+                            or m.get("line")
+                            or m.get("lineno")
+                            or m.get("line_no")
+                            or 1
+                        )
+                    elif hasattr(m, "file_path"):
+                        file_val = getattr(m, "file_path")
+                        line_val = getattr(m, "line_number", 1)
+                    elif hasattr(m, "file"):
+                        file_val = getattr(m, "file")
+                        line_val = getattr(m, "line", 1)
+                    elif hasattr(m, "path"):
+                        file_val = getattr(m, "path")
+                        line_val = getattr(m, "line", 1)
+                    elif isinstance(m, str):
+                        parts = m.split(":", 2)
+                        if len(parts) >= 2:
+                            file_val = parts[0].strip()
+                            try:
+                                line_val = int(parts[1].strip())
+                            except ValueError:
+                                line_val = 1
+
+                    if file_val:
+                        mf = str(file_val).replace("\\", "/").strip()
+                        if mf.startswith("./"):
+                            mf = mf[2:]
+                        if mf.startswith("/"):
+                            mf = mf[1:]
+
+                        try:
+                            ln = int(line_val)
+                        except (ValueError, TypeError):
+                            ln = 1
+
+                        search_match_map.setdefault(mf, set()).add(ln)
+                        if mf.lower() != mf:
+                            search_match_map.setdefault(mf.lower(), set()).add(ln)
+                        base_name = Path(mf).name
+                        if base_name != mf:
+                            search_match_map.setdefault(base_name, set()).add(ln)
+                            if base_name.lower() != base_name:
+                                search_match_map.setdefault(
+                                    base_name.lower(), set()
+                                ).add(ln)
         except Exception as search_err:
             logger.debug(
-                "Context search_code skipped for pattern '%s': %s", sk, search_err
+                "Context search_code skipped for query '%s': %s", sk, search_err
             )
 
     # 3. Deterministic relevance scoring
@@ -311,9 +395,18 @@ def build_repository_context(
                 reasons.append(f"Path contains keyword '{kw}'")
 
         # Search content matches
-        if f in search_match_map or f_name in search_match_map:
-            matches = search_match_map.get(f) or search_match_map.get(f_name, [])
-            match_cnt = len(matches)
+        matched_lines = set()
+        if f in search_match_map:
+            matched_lines.update(search_match_map[f])
+        elif f.lower() in search_match_map:
+            matched_lines.update(search_match_map[f.lower()])
+        elif f_name in search_match_map:
+            matched_lines.update(search_match_map[f_name])
+        elif f_name.lower() in search_match_map:
+            matched_lines.update(search_match_map[f_name.lower()])
+
+        if matched_lines:
+            match_cnt = len(matched_lines)
             score += min(match_cnt * 2.0, 6.0)
             reasons.append(f"Contains {match_cnt} search match(es)")
 

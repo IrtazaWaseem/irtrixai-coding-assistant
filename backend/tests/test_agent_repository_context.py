@@ -1,3 +1,4 @@
+# test_agent_repository_context.py
 import asyncio
 import json
 import subprocess
@@ -21,6 +22,8 @@ from app.schemas.agent_contracts import (
 )
 from app.services.context_service import build_repository_context
 from app.services.llm.gateway import LLMGateway
+from app.tools.base import ToolResult
+from app.tools.file_tools import search_code
 from app.tools.validators import is_protected_file, validate_safe_path
 
 
@@ -606,3 +609,72 @@ async def test_25_concurrent_run_task_returns_409(tmp_path: Path):
         app.dependency_overrides.clear()
         settings.WORKSPACE_BASE_PATH = original_base
         set_llm_gateway(None)
+
+
+def test_26_search_code_contract_and_content_relevance(tmp_path: Path):
+    """Proves search_code is invoked with valid query and workspace_root, search hits boost relevance, and limits are enforced."""
+    ws = tmp_path / "ws_search"
+    ws.mkdir(parents=True, exist_ok=True)
+    target_file = ws / "internal_logic.py"
+    target_file.write_text(
+        "def perform_complex_discount(price):\n    return price * 0.85\n",
+        encoding="utf-8",
+    )
+    other_file = ws / "irrelevant.py"
+    other_file.write_text("x = 1\n", encoding="utf-8")
+    init_test_git_repo(ws)
+
+    # 1. Content-based match (filename does not match prompt keyword)
+    ctx = build_repository_context(
+        str(ws),
+        "complex_discount",
+        max_search_results=5,
+    )
+
+    relevant_paths = [f.path for f in ctx.relevant_files]
+    assert "internal_logic.py" in relevant_paths
+    matched_rf = next(f for f in ctx.relevant_files if f.path == "internal_logic.py")
+    assert matched_rf.relevance_score > 0
+    assert "search match" in matched_rf.reason.lower()
+    assert "perform_complex_discount" in matched_rf.excerpt
+
+    # 2. Verify signature invocation and workspace_root propagation
+    with patch(
+        "app.services.context_service.search_code", wraps=search_code
+    ) as spy_search:
+        build_repository_context(str(ws), "complex_discount")
+        assert spy_search.called
+        call_kwargs = spy_search.call_args[1]
+        assert "query" in call_kwargs
+        assert call_kwargs["workspace_root"] == ws.resolve()
+        assert "pattern" not in call_kwargs
+        assert "max_results" not in call_kwargs
+
+    # 3. Caller-side result bounding with valid 1-based line numbers
+    many_matches = [
+        {"file_path": "internal_logic.py", "line_number": i, "content": f"match {i}"}
+        for i in range(1, 26)
+    ]
+    mock_res = ToolResult(
+        tool_name="search_code",
+        success=True,
+        output={"matches": many_matches},
+    )
+    with patch("app.services.context_service.search_code", return_value=mock_res):
+        bounded_ctx = build_repository_context(
+            str(ws), "complex_discount", max_search_results=3
+        )
+        assert bounded_ctx is not None
+        bounded_rf = next(
+            f for f in bounded_ctx.relevant_files if f.path == "internal_logic.py"
+        )
+        assert "3 search match(es)" in bounded_rf.reason
+
+    # 4. Safe fallback if search_code raises an exception
+    with patch(
+        "app.services.context_service.search_code",
+        side_effect=RuntimeError("Search engine fault"),
+    ):
+        fallback_ctx = build_repository_context(str(ws), "complex_discount")
+        assert fallback_ctx is not None
+        assert isinstance(fallback_ctx.relevant_files, list)
