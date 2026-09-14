@@ -18,7 +18,9 @@ from app.services.llm.gateway import LLMGateway
 
 
 def test_sanitize_postgres_error_redacts_credentials_and_uri():
-    raw_err = "connection to postgresql://myuser:secret123@localhost:5432/mydb?sslmode=disable failed"
+    raw_err = (
+        "connection to postgresql://myuser:secret123@localhost:5432/mydb?sslmode=disable failed"
+    )
     sanitized = sanitize_postgres_error(raw_err)
     assert "secret123" not in sanitized
     assert "myuser" not in sanitized
@@ -46,10 +48,7 @@ async def test_postgres_initialize_sanitizes_thrown_error():
         with pytest.raises(ToolExecutionException) as exc_info:
             await manager.initialize()
         err_msg = str(exc_info.value)
-        assert (
-            settings.POSTGRES_PASSWORD not in err_msg
-            or len(settings.POSTGRES_PASSWORD) < 4
-        )
+        assert settings.POSTGRES_PASSWORD not in err_msg or len(settings.POSTGRES_PASSWORD) < 4
         assert "[REDACTED_PASSWORD]" in err_msg or "******" in err_msg
 
 
@@ -153,9 +152,7 @@ async def test_postgres_rejection_feedback_loop_persistence():
         init_state = create_initial_state("task-rej", "/tmp/ws", thread_id)
         await graph.ainvoke(init_state, config=config)
 
-        cmd = Command(
-            resume={"approved": False, "feedback": "Fix security vulnerability"}
-        )
+        cmd = Command(resume={"approved": False, "feedback": "Fix security vulnerability"})
         await graph.ainvoke(cmd, config=config)
 
         snap = await graph.aget_state(config)

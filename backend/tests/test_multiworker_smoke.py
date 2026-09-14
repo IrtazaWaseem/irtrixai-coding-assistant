@@ -1,13 +1,13 @@
 import asyncio
 import os
-from pathlib import Path
 import socket
 import subprocess
 import sys
 import tempfile
+from pathlib import Path
 
-from httpx import AsyncClient
 import pytest
+from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.db.base import Base
@@ -73,7 +73,6 @@ def init_test_git_repo(repo_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_real_multiworker_process_duplicate_run_protection(tmp_path: Path):
     """Proves two distinct OS uvicorn worker processes sharing PostgreSQL reject duplicate execution."""
-    raw_uri = get_test_postgres_uri()
     async_uri = get_test_postgres_async_uri()
     try:
         engine = create_async_engine(async_uri, echo=False)

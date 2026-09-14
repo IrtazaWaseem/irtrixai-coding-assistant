@@ -8,7 +8,7 @@ on:
 
 jobs:
   job-a-unit-tests:
-    name: Job A — Fast Unit Tests
+    name: Job A — Fast Unit Tests & Install Gate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -21,8 +21,19 @@ jobs:
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install -e "backend/[dev]"
+          python -m pip install --upgrade pip setuptools wheel
+          cd backend
+          pip install -e ".[dev]"
+
+      - name: Verify Clean Package Import
+        run: |
+          cd backend
+          python -c "import app.main; print('Import app.main successful')"
+
+      - name: Verify Test Collection
+        run: |
+          cd backend
+          pytest --collect-only
 
       - name: Run Ruff Linter
         run: |
@@ -64,12 +75,14 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -e "backend/[dev]"
+          cd backend
+          pip install -e ".[dev]"
 
       - name: Run Database Migrations
         env:
           POSTGRES_HOST: localhost
           POSTGRES_PORT: 5432
+          TEST_POSTGRES_PORT: 5432
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: test_secure_password_123
           POSTGRES_DB: irtrixai_test
@@ -81,9 +94,11 @@ jobs:
         env:
           POSTGRES_HOST: localhost
           POSTGRES_PORT: 5432
+          TEST_POSTGRES_PORT: 5432
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: test_secure_password_123
           POSTGRES_DB: irtrixai_test
+          DATABASE_URL: postgresql+asyncpg://postgres:test_secure_password_123@localhost:5432/irtrixai_test
         run: |
           cd backend
           python -m pytest tests/test_postgres_concurrency.py tests/test_postgres_checkpoint_recovery.py -v
@@ -103,7 +118,8 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -e "backend/[dev]"
+          cd backend
+          pip install -e ".[dev]"
 
       - name: Build Sandbox Docker Image
         run: |
@@ -145,7 +161,8 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -e "backend/[dev]"
+          cd backend
+          pip install -e ".[dev]"
 
       - name: Build Sandbox Image
         run: |
@@ -155,9 +172,11 @@ jobs:
         env:
           POSTGRES_HOST: localhost
           POSTGRES_PORT: 5432
+          TEST_POSTGRES_PORT: 5432
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: test_secure_password_123
           POSTGRES_DB: irtrixai_test
+          DATABASE_URL: postgresql+asyncpg://postgres:test_secure_password_123@localhost:5432/irtrixai_test
         run: |
           cd backend
           alembic upgrade head
@@ -167,9 +186,11 @@ jobs:
         env:
           POSTGRES_HOST: localhost
           POSTGRES_PORT: 5432
+          TEST_POSTGRES_PORT: 5432
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: test_secure_password_123
           POSTGRES_DB: irtrixai_test
+          DATABASE_URL: postgresql+asyncpg://postgres:test_secure_password_123@localhost:5432/irtrixai_test
         run: |
           cd backend
           python -m pytest tests/ -v

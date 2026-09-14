@@ -1,39 +1,31 @@
 import json
 import re
-from enum import Enum
-from typing import Any, TypeVar
+from enum import StrEnum
+from typing import Any
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-T = TypeVar("T", bound=BaseModel)
 
-
-class ReviewerVerdict(str, Enum):
+class ReviewerVerdict(StrEnum):
     APPROVED = "approved"
     REJECTED = "rejected"
     CHANGES_REQUESTED = "changes_requested"
 
 
-class FinalizationStatus(str, Enum):
+class FinalizationStatus(StrEnum):
     COMPLETED = "completed"
     FAILED = "failed"
     ABORTED = "aborted"
 
 
 class PlannerOutput(BaseModel):
-    summary: str = Field(
-        ..., min_length=1, description="High-level architectural summary"
-    )
-    steps: list[str] = Field(
-        ..., min_length=1, description="Concrete implementation sequence"
-    )
+    summary: str = Field(..., min_length=1, description="High-level architectural summary")
+    steps: list[str] = Field(..., min_length=1, description="Concrete implementation sequence")
     objective: str = Field(
         default="", description="Specific user-requested outcome and functional goal"
     )
     plan_id: str | None = Field(default=None, description="Optional plan identifier")
-    files_expected: list[str] = Field(
-        default_factory=list, description="Target workspace paths"
-    )
+    files_expected: list[str] = Field(default_factory=list, description="Target workspace paths")
     affected_files: list[str] = Field(
         default_factory=list, description="Files directly targeted for modification"
     )
@@ -57,9 +49,7 @@ class PlannerOutput(BaseModel):
         default="",
         description="Justification for why this is the smallest correct change",
     )
-    risk_notes: list[str] = Field(
-        default_factory=list, description="Risk considerations"
-    )
+    risk_notes: list[str] = Field(default_factory=list, description="Risk considerations")
     risks_and_mitigations: list[str] = Field(
         default_factory=list, description="Edge cases and mitigations"
     )
@@ -94,9 +84,7 @@ class PlannerOutput(BaseModel):
 
 
 class CoderOutput(BaseModel):
-    summary: str = Field(
-        ..., min_length=1, description="Summary of proposed code mutations"
-    )
+    summary: str = Field(..., min_length=1, description="Summary of proposed code mutations")
     patch: str = Field(default="", description="Standard unified diff or patch block")
     files_changed: list[str] = Field(
         default_factory=list, description="List of workspace-relative paths"
@@ -130,9 +118,7 @@ class DebuggerOutput(BaseModel):
     root_cause: str = Field(
         default="", description="Underlying technical defect causing the failure"
     )
-    evidence: str = Field(
-        default="", description="Key stack traces, error lines, or log evidence"
-    )
+    evidence: str = Field(default="", description="Key stack traces, error lines, or log evidence")
     repair_strategy: str = Field(
         default="",
         description="Targeted, minimal repair direction without collateral changes",
@@ -140,9 +126,7 @@ class DebuggerOutput(BaseModel):
     regression_risk: str = Field(
         default="", description="Existing functionality that must be preserved"
     )
-    files_to_change: list[str] = Field(
-        default_factory=list, description="Files requiring repair"
-    )
+    files_to_change: list[str] = Field(default_factory=list, description="Files requiring repair")
     reproduction_command: str | None = Field(
         default=None, description="Command to reproduce test failure"
     )
@@ -165,12 +149,8 @@ class ReviewerOutput(BaseModel):
     verdict: ReviewerVerdict = Field(..., description="Review outcome")
     summary: str = Field(..., description="Audit verdict justification")
     issues: list[str] = Field(default_factory=list, description="Defects found")
-    security_concerns: list[str] = Field(
-        default_factory=list, description="Security findings"
-    )
-    required_changes: list[str] = Field(
-        default_factory=list, description="Mandatory remedies"
-    )
+    security_concerns: list[str] = Field(default_factory=list, description="Security findings")
+    required_changes: list[str] = Field(default_factory=list, description="Mandatory remedies")
 
 
 class FinalizationResult(BaseModel):
@@ -182,7 +162,7 @@ class FinalizationResult(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-def parse_structured_output(text: Any, schema: type[T]) -> T:
+def parse_structured_output[T: BaseModel](text: Any, schema: type[T]) -> T:
     """Parses JSON string, markdown codeblock, or dict into the requested Pydantic schema."""
     if isinstance(text, dict):
         return schema.model_validate(text)
@@ -208,12 +188,8 @@ def parse_structured_output(text: Any, schema: type[T]) -> T:
 
 class RelevantFileContext(BaseModel):
     path: str = Field(..., description="Workspace-relative path of the relevant file")
-    relevance_score: float = Field(
-        default=0.0, description="Deterministic relevance score"
-    )
-    reason: str = Field(
-        default="", description="Reason this file was determined relevant"
-    )
+    relevance_score: float = Field(default=0.0, description="Deterministic relevance score")
+    reason: str = Field(default="", description="Reason this file was determined relevant")
     excerpt: str = Field(default="", description="Bounded text excerpt from the file")
     start_line: int = Field(default=1, description="1-based start line of the excerpt")
     end_line: int = Field(default=1, description="1-based end line of the excerpt")
@@ -221,21 +197,13 @@ class RelevantFileContext(BaseModel):
 
 
 class RepositoryContext(BaseModel):
-    summary: str = Field(
-        default="", description="Summary of repository context and relevance"
-    )
-    tech_stack: list[str] = Field(
-        default_factory=list, description="Detected technology stack"
-    )
+    summary: str = Field(default="", description="Summary of repository context and relevance")
+    tech_stack: list[str] = Field(default_factory=list, description="Detected technology stack")
     relevant_files: list[RelevantFileContext] = Field(
         default_factory=list, description="Ranked relevant files with excerpts"
     )
-    total_files_considered: int = Field(
-        default=0, description="Total workspace files evaluated"
-    )
-    files_included: int = Field(
-        default=0, description="Count of relevant files included"
-    )
+    total_files_considered: int = Field(default=0, description="Total workspace files evaluated")
+    files_included: int = Field(default=0, description="Count of relevant files included")
     truncated: bool = Field(
         default=False,
         description="Whether total context limits caused truncation",

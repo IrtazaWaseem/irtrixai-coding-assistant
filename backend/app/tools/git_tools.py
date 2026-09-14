@@ -128,13 +128,11 @@ def git_status(
     except ToolExecutionException:
         if raise_on_error:
             raise
-        return ToolResult(
-            tool_name="git_status", success=False, error="Tool execution failed."
-        )
+        return ToolResult(tool_name="git_status", success=False, error="Tool execution failed.")
     except Exception as err:
         err_msg = f"git_status failed: {err}"
         if raise_on_error:
-            raise ToolExecutionException(err_msg)
+            raise ToolExecutionException(err_msg) from err
         return ToolResult(
             tool_name="git_status",
             success=False,
@@ -214,9 +212,7 @@ def git_diff(
         diff_out = res.stdout
         max_bytes = getattr(settings, "MAX_TOOL_OUTPUT_BYTES", 51_200)
         trunc_raw = truncate_output(diff_out, max_bytes=max_bytes)
-        bounded_out = (
-            trunc_raw[0] if isinstance(trunc_raw, (tuple, list)) else str(trunc_raw)
-        )
+        bounded_out = trunc_raw[0] if isinstance(trunc_raw, (tuple, list)) else str(trunc_raw)
         is_truncated = (
             trunc_raw[1]
             if isinstance(trunc_raw, (tuple, list)) and len(trunc_raw) > 1
@@ -236,25 +232,19 @@ def git_diff(
     except SecurityViolationException:
         if raise_on_error:
             raise
-        return ToolResult(
-            tool_name="git_diff", success=False, error="Security violation detected."
-        )
+        return ToolResult(tool_name="git_diff", success=False, error="Security violation detected.")
     except EntityNotFoundException:
         if raise_on_error:
             raise
-        return ToolResult(
-            tool_name="git_diff", success=False, error="Entity not found."
-        )
+        return ToolResult(tool_name="git_diff", success=False, error="Entity not found.")
     except ToolExecutionException:
         if raise_on_error:
             raise
-        return ToolResult(
-            tool_name="git_diff", success=False, error="Tool execution failed."
-        )
+        return ToolResult(tool_name="git_diff", success=False, error="Tool execution failed.")
     except Exception as err:
         err_msg = f"git_diff failed: {err}"
         if raise_on_error:
-            raise ToolExecutionException(err_msg)
+            raise ToolExecutionException(err_msg) from err
         return ToolResult(
             tool_name="git_diff",
             success=False,

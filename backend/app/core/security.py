@@ -39,11 +39,11 @@ def validate_workspace_path(
         base = Path(trusted_base).resolve()
         try:
             resolved.relative_to(base)
-        except ValueError:
+        except ValueError as err:
             raise SecurityViolationException(
                 f"Access denied: path '{workspace_path}' escapes workspace boundary.",
                 details={"workspace_path": str(workspace_path)},
-            )
+            ) from err
 
     return resolved
 
@@ -64,11 +64,11 @@ def resolve_safe_path(base_directory: str | Path, target_path: str | Path) -> Pa
 
     try:
         resolved.relative_to(base)
-    except ValueError:
+    except ValueError as err:
         raise SecurityViolationException(
             f"Access denied: path '{target_path}' escapes workspace boundary.",
             details={"path": str(target_path)},
-        )
+        ) from err
 
     return resolved
 
@@ -133,9 +133,7 @@ def validate_command(command: str | list[str]) -> list[str]:
         try:
             tokens = shlex.split(command.strip(), posix=True)
         except ValueError as err:
-            raise DisallowedCommandException(
-                f"Failed to parse command syntax: {err}"
-            ) from err
+            raise DisallowedCommandException(f"Failed to parse command syntax: {err}") from err
     elif isinstance(command, (list, tuple)):
         if not command:
             raise DisallowedCommandException("Command list cannot be empty.")
@@ -143,9 +141,7 @@ def validate_command(command: str | list[str]) -> list[str]:
         if not any(token.strip() for token in tokens):
             raise DisallowedCommandException("Command list cannot be empty.")
     else:
-        raise DisallowedCommandException(
-            "Command must be a string or a list of arguments."
-        )
+        raise DisallowedCommandException("Command must be a string or a list of arguments.")
 
     if not tokens:
         raise DisallowedCommandException("Command contained no executable tokens.")
@@ -164,8 +160,6 @@ def validate_command(command: str | list[str]) -> list[str]:
 
     for token in tokens:
         if token in FORBIDDEN_COMMAND_TOKENS:
-            raise DisallowedCommandException(
-                f"Shell control token '{token}' is forbidden."
-            )
+            raise DisallowedCommandException(f"Shell control token '{token}' is forbidden.")
 
     return tokens

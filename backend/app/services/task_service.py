@@ -61,11 +61,11 @@ class TaskService:
     async def get_task(db: AsyncSession, task_id: str) -> Task:
         try:
             task_uuid = uuid.UUID(task_id) if isinstance(task_id, str) else task_id
-        except (ValueError, AttributeError):
+        except (ValueError, AttributeError) as err:
             raise AppException(
                 status_code=404,
                 message=f"Task '{task_id}' not found.",
-            )
+            ) from err
 
         query = (
             select(Task)
@@ -94,11 +94,11 @@ class TaskService:
         """
         try:
             task_uuid = uuid.UUID(task_id) if isinstance(task_id, str) else task_id
-        except (ValueError, AttributeError):
+        except (ValueError, AttributeError) as err:
             raise AppException(
                 status_code=404,
                 message=f"Task '{task_id}' not found.",
-            )
+            ) from err
 
         query = (
             select(Task)
@@ -148,11 +148,11 @@ class TaskService:
         """Fix #1: Atomically locks task row with FOR UPDATE and verifies task is AWAITING_APPROVAL."""
         try:
             task_uuid = uuid.UUID(task_id) if isinstance(task_id, str) else task_id
-        except (ValueError, AttributeError):
+        except (ValueError, AttributeError) as err:
             raise AppException(
                 status_code=404,
                 message=f"Task '{task_id}' not found.",
-            )
+            ) from err
 
         query = (
             select(Task)
@@ -191,9 +191,7 @@ class TaskService:
     lock_task_for_approval = prepare_task_for_approval
 
     @staticmethod
-    async def reconcile_task_status(
-        db: AsyncSession, task: Task, graph: Any = None
-    ) -> Task:
+    async def reconcile_task_status(db: AsyncSession, task: Task, graph: Any = None) -> Task:
         """Conservatively reconciles database Task.status against checkpointed LangGraph state."""
         if task.status in (
             TaskStatus.COMPLETED,
@@ -226,9 +224,7 @@ class TaskService:
 
             if snap.next == ("approval_gate",):
                 if task.status != TaskStatus.AWAITING_APPROVAL:
-                    return await TaskService.update_task_status(
-                        db, task, "awaiting_approval"
-                    )
+                    return await TaskService.update_task_status(db, task, "awaiting_approval")
                 return task
 
             if not snap.next:
@@ -238,20 +234,14 @@ class TaskService:
                         final.get("status") if isinstance(final, dict) else None
                     )
                     if st == "completed" and task.status != TaskStatus.COMPLETED:
-                        return await TaskService.update_task_status(
-                            db, task, "completed"
-                        )
+                        return await TaskService.update_task_status(db, task, "completed")
                     if st == "failed" and task.status != TaskStatus.FAILED:
                         err = getattr(final, "summary", None) or (
                             final.get("summary") if isinstance(final, dict) else None
                         )
-                        return await TaskService.update_task_status(
-                            db, task, "failed", error=err
-                        )
+                        return await TaskService.update_task_status(db, task, "failed", error=err)
                     if st == "aborted" and task.status != TaskStatus.CANCELLED:
-                        return await TaskService.update_task_status(
-                            db, task, "cancelled"
-                        )
+                        return await TaskService.update_task_status(db, task, "cancelled")
                 elif task.status == TaskStatus.RUNNING:
                     return await TaskService.update_task_status(
                         db,

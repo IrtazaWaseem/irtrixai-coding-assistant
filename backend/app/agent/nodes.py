@@ -808,9 +808,9 @@ async def test_runner(
         if isinstance(raw_res, dict) and "success" in raw_res:
             success = bool(raw_res["success"])
         elif hasattr(raw_res, "success") and isinstance(
-            getattr(raw_res, "success"), bool
+            raw_res.success, bool
         ):
-            success = bool(getattr(raw_res, "success"))
+            success = bool(raw_res.success)
         elif exit_code is not None:
             success = exit_code == 0
         else:

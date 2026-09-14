@@ -1,9 +1,9 @@
 import contextlib
 import json
 import os
-from pathlib import Path
 import subprocess
 import tempfile
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest

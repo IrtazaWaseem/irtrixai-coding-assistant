@@ -85,9 +85,7 @@ async def test_approved_valid_patch_applied_to_filesystem(tmp_path: Path):
     assert res["applied_diff"] is not None
     assert "-    return a - b" in res["applied_diff"]
     assert "+    return a + b" in res["applied_diff"]
-    assert (
-        target_file.read_text(encoding="utf-8") == "def add(a, b):\n    return a + b\n"
-    )
+    assert target_file.read_text(encoding="utf-8") == "def add(a, b):\n    return a + b\n"
 
 
 @pytest.mark.asyncio
@@ -164,7 +162,9 @@ async def test_coder_proposal_alone_does_not_mutate_filesystem(tmp_path: Path):
     target_file.write_text(initial_text, encoding="utf-8")
 
     mock_gw = MagicMock(spec=LLMGateway)
-    patch_text = "--- a/models.py\n+++ b/models.py\n@@ -1 +1 @@\n-class User: pass\n+class User: id: int\n"
+    patch_text = (
+        "--- a/models.py\n+++ b/models.py\n@@ -1 +1 @@\n-class User: pass\n+class User: id: int\n"
+    )
     mock_gw.generate_structured = AsyncMock(
         return_value=CoderOutput(
             summary="Add model id",
@@ -186,8 +186,7 @@ async def test_path_traversal_patch_rejected_and_aborts_mutation(tmp_path: Path)
     init_test_git_repo(tmp_path)
 
     traversal_patch = (
-        "--- a/../../outside.py\n+++ b/../../outside.py\n@@ -1 +1 @@\n"
-        "-evil = False\n+evil = True\n"
+        "--- a/../../outside.py\n+++ b/../../outside.py\n@@ -1 +1 @@\n-evil = False\n+evil = True\n"
     )
 
     state = create_initial_state("task-p5", str(tmp_path), "thread-p5")
@@ -206,9 +205,7 @@ async def test_absolute_path_patch_rejected(tmp_path: Path):
     (tmp_path / "safe.py").write_text("x = 1\n", encoding="utf-8")
     init_test_git_repo(tmp_path)
 
-    absolute_patch = (
-        "--- a//etc/shadow\n+++ b//etc/shadow\n@@ -1 +1 @@\n-root:*\n+root:pwned\n"
-    )
+    absolute_patch = "--- a//etc/shadow\n+++ b//etc/shadow\n@@ -1 +1 @@\n-root:*\n+root:pwned\n"
 
     state = create_initial_state("task-p6", str(tmp_path), "thread-p6")
     state["pending_patch"] = absolute_patch
@@ -272,8 +269,7 @@ async def test_checkpoint_resume_then_apply_patch_lifecycle(tmp_path: Path):
     init_test_git_repo(tmp_path)
 
     patch_text = (
-        "--- a/feature.py\n+++ b/feature.py\n@@ -1 +1 @@\n"
-        "-ENABLED = False\n+ENABLED = True\n"
+        "--- a/feature.py\n+++ b/feature.py\n@@ -1 +1 @@\n-ENABLED = False\n+ENABLED = True\n"
     )
     mock_gw = MagicMock(spec=LLMGateway)
 
@@ -313,9 +309,7 @@ async def test_checkpoint_resume_then_apply_patch_lifecycle(tmp_path: Path):
         "truncated": False,
         "duration_seconds": 0.01,
     }
-    config = {
-        "configurable": {"thread_id": thread_id, "execution_service": execution_service}
-    }
+    config = {"configurable": {"thread_id": thread_id, "execution_service": execution_service}}
     shared_saver = MemorySaver()
 
     graph_a = build_agent_graph(checkpointer=shared_saver)

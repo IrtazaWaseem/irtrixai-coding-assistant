@@ -286,7 +286,7 @@ def build_repository_context(
                 elif isinstance(s_res.output, list):
                     raw_matches = s_res.output
                 elif hasattr(s_res.output, "matches"):
-                    raw_matches = getattr(s_res.output, "matches")
+                    raw_matches = s_res.output.matches
                 elif isinstance(s_res.output, str):
                     raw_matches = [
                         line for line in s_res.output.splitlines() if line.strip()
@@ -319,13 +319,13 @@ def build_repository_context(
                             or 1
                         )
                     elif hasattr(m, "file_path"):
-                        file_val = getattr(m, "file_path")
+                        file_val = m.file_path
                         line_val = getattr(m, "line_number", 1)
                     elif hasattr(m, "file"):
-                        file_val = getattr(m, "file")
+                        file_val = m.file
                         line_val = getattr(m, "line", 1)
                     elif hasattr(m, "path"):
-                        file_val = getattr(m, "path")
+                        file_val = m.path
                         line_val = getattr(m, "line", 1)
                     elif isinstance(m, str):
                         parts = m.split(":", 2)
