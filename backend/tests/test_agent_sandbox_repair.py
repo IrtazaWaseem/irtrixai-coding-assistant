@@ -1,3 +1,4 @@
+import os
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -530,6 +531,16 @@ async def test_live_docker_end_to_end_repair_loop(tmp_path: Path):
     )
     init_test_git_repo(tmp_path)
 
+    try:
+        os.chmod(tmp_path, 0o777)
+        for p in tmp_path.rglob("*"):
+            if p.is_file():
+                os.chmod(p, 0o666)
+            elif p.is_dir():
+                os.chmod(p, 0o777)
+    except Exception:
+        pass
+
     initial_patch = "--- a/solution.py\n+++ b/solution.py\n@@ -1 +1 @@\n-def solve(): return 1\n+def solve(): return 0\n"
     repair_patch = "--- a/solution.py\n+++ b/solution.py\n@@ -1 +1 @@\n-def solve(): return 0\n+def solve(): return 2\n"
     coder_call_count = 0
@@ -569,30 +580,31 @@ async def test_live_docker_end_to_end_repair_loop(tmp_path: Path):
     mock_gw.generate_structured = AsyncMock(side_effect=mock_structured)
     set_llm_gateway(mock_gw)
 
-    thread_id = "th-live-docker-repair"
-    config = {"configurable": {"thread_id": thread_id}}
-    graph = build_agent_graph()
+    try:
+        thread_id = "th-live-docker-repair"
+        config = {"configurable": {"thread_id": thread_id}}
+        graph = build_agent_graph()
 
-    state = create_initial_state("task-live", str(tmp_path), thread_id)
-    state["test_command"] = "pytest -p no:cacheprovider"
-    await graph.ainvoke(state, config=config)
+        state = create_initial_state("task-live", str(tmp_path), thread_id)
+        state["test_command"] = "pytest -p no:cacheprovider"
+        await graph.ainvoke(state, config=config)
 
-    # Approve initial (solution.py becomes return 0 -> test fails in Docker) -> debugger -> coder -> pauses at approval_gate
-    await graph.ainvoke(Command(resume={"approved": True}), config=config)
+        # Approve initial (solution.py becomes return 0 -> test fails in Docker) -> debugger -> coder -> pauses at approval_gate
+        await graph.ainvoke(Command(resume={"approved": True}), config=config)
 
-    snap = await graph.aget_state(config)
-    assert snap.next == ("approval_gate",)
-    assert snap.values["repair_count"] == 1
-    assert snap.values["test_result"]["is_stub"] is False
-    assert snap.values["test_result"]["exit_code"] == 1
+        snap = await graph.aget_state(config)
+        assert snap.next == ("approval_gate",)
+        assert snap.values["repair_count"] == 1
+        assert snap.values["test_result"]["is_stub"] is False
+        assert snap.values["test_result"]["exit_code"] == 1
 
-    # Approve repair patch (solution.py becomes return 2 -> test passes in Docker) -> reviewer -> finalize
-    await graph.ainvoke(Command(resume={"approved": True}), config=config)
+        # Approve repair patch (solution.py becomes return 2 -> test passes in Docker) -> reviewer -> finalize
+        await graph.ainvoke(Command(resume={"approved": True}), config=config)
 
-    final_snap = await graph.aget_state(config)
-    assert final_snap.next == ()
-    assert final_snap.values["final_result"].status == "completed"
-    assert final_snap.values["test_result"]["exit_code"] == 0
-    assert final_snap.values["test_result"]["success"] is True
-
-    set_llm_gateway(None)
+        final_snap = await graph.aget_state(config)
+        assert final_snap.next == ()
+        assert final_snap.values["final_result"].status == "completed"
+        assert final_snap.values["test_result"]["exit_code"] == 0
+        assert final_snap.values["test_result"]["success"] is True
+    finally:
+        set_llm_gateway(None)
