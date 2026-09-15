@@ -79,6 +79,8 @@ def test_get_production_graph_fails_closed_when_uninitialized():
         assert "Production checkpointer is not initialized" in str(exc_info.value)
 
 
+@pytest.mark.postgres
+@pytest.mark.integration
 @pytest.mark.asyncio
 async def test_postgres_checkpoint_persistence_across_graph_instances():
     mock_saver = MemorySaver()
@@ -125,6 +127,8 @@ async def test_postgres_checkpoint_persistence_across_graph_instances():
     set_llm_gateway(None)
 
 
+@pytest.mark.postgres
+@pytest.mark.integration
 @pytest.mark.asyncio
 async def test_postgres_rejection_feedback_loop_persistence():
     mock_saver = MemorySaver()
@@ -162,6 +166,8 @@ async def test_postgres_rejection_feedback_loop_persistence():
     set_llm_gateway(None)
 
 
+@pytest.mark.postgres
+@pytest.mark.integration
 @pytest.mark.asyncio
 async def test_postgres_multiple_threads_isolated():
     mock_saver = MemorySaver()

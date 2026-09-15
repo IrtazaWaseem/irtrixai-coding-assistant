@@ -47,18 +47,14 @@ class LLMConfig(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    provider: str = Field(
-        ..., description="Provider identifier: 'ollama', 'groq', or 'gemini'"
-    )
+    provider: str = Field(..., description="Provider identifier: 'ollama', 'groq', or 'gemini'")
     model: str = Field(..., description="Arbitrary model identifier string")
     api_key: str | None = Field(default=None, repr=False, exclude=True)
     base_url: str | None = Field(
         default=None, description="Endpoint URL for local or self-hosted engines"
     )
     timeout_seconds: int = Field(default=60, description="Request timeout in seconds")
-    max_retries: int = Field(
-        default=3, description="Maximum retries for transient errors"
-    )
+    max_retries: int = Field(default=3, description="Maximum retries for transient errors")
     thinking_level: str = Field(
         default="low",
         description="Reasoning/thinking effort level ('low', 'medium', 'high')",
@@ -76,12 +72,8 @@ class LLMResponse(BaseModel):
 
     content: str = Field(..., description="Generated text content")
     model: str = Field(..., description="Model identifier that produced the content")
-    provider: str = Field(
-        ..., description="Provider identifier that fulfilled the request"
-    )
-    finish_reason: str | None = Field(
-        default=None, description="Generation completion reason"
-    )
+    provider: str = Field(..., description="Provider identifier that fulfilled the request")
+    finish_reason: str | None = Field(default=None, description="Generation completion reason")
     raw_usage: dict[str, Any] | None = Field(
         default=None, description="Token consumption metrics if reported"
     )
@@ -95,3 +87,13 @@ class LLMStreamChunk(BaseModel):
     delta: str = ""
     finish_reason: str | None = None
     provider_switched: bool = False
+
+
+class ModelCapabilities(BaseModel):
+    """Capabilities profile for a given LLM provider and model."""
+
+    supports_structured_output: bool = True
+    supports_streaming: bool = True
+    supports_vision: bool = False
+    context_window: int = 128000
+    default_temperature: float = 0.7

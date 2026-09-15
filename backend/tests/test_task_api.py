@@ -24,6 +24,8 @@ from app.schemas.agent_contracts import (
 from app.services.llm.gateway import LLMGateway
 from app.services.task_service import TaskService
 
+pytestmark = [pytest.mark.postgres, pytest.mark.integration]
+
 
 def init_test_git_repo(repo_path: Path) -> None:
     (repo_path / ".gitkeep").touch()
@@ -40,9 +42,7 @@ def init_test_git_repo(repo_path: Path) -> None:
         capture_output=True,
         check=True,
     )
-    subprocess.run(
-        ["git", "add", "."], cwd=str(repo_path), capture_output=True, check=True
-    )
+    subprocess.run(["git", "add", "."], cwd=str(repo_path), capture_output=True, check=True)
     subprocess.run(
         ["git", "commit", "-m", "initial commit"],
         cwd=str(repo_path),
@@ -62,9 +62,7 @@ async def test_create_task_success(tmp_path: Path):
 
     transport = ASGITransport(app=app)
     try:
-        async with AsyncClient(
-            transport=transport, base_url="http://testserver"
-        ) as client:
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
             res = await client.post(
                 "/api/v1/tasks",
                 json={
@@ -117,9 +115,7 @@ async def test_get_task_success_and_nonexistent(tmp_path: Path):
 
     transport = ASGITransport(app=app)
     try:
-        async with AsyncClient(
-            transport=transport, base_url="http://testserver"
-        ) as client:
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
             create_res = await client.post(
                 "/api/v1/tasks",
                 json={"workspace_path": str(ws), "prompt": "Test get"},
@@ -130,9 +126,7 @@ async def test_get_task_success_and_nonexistent(tmp_path: Path):
             assert get_res.status_code == 200
             assert get_res.json()["id"] == task_id
 
-            missing_res = await client.get(
-                "/api/v1/tasks/00000000-0000-0000-0000-000000000000"
-            )
+            missing_res = await client.get("/api/v1/tasks/00000000-0000-0000-0000-000000000000")
             assert missing_res.status_code == 404
     finally:
         settings.WORKSPACE_BASE_PATH = original_base
@@ -165,9 +159,7 @@ async def test_run_task_reaches_approval_gate_interrupt(tmp_path: Path):
 
     transport = ASGITransport(app=app)
     try:
-        async with AsyncClient(
-            transport=transport, base_url="http://testserver"
-        ) as client:
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
             create_res = await client.post(
                 "/api/v1/tasks",
                 json={"workspace_path": str(ws), "prompt": "Run to gate"},
@@ -225,9 +217,7 @@ async def test_submit_approval_resumes_and_completes(tmp_path: Path):
 
     transport = ASGITransport(app=app)
     try:
-        async with AsyncClient(
-            transport=transport, base_url="http://testserver"
-        ) as client:
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
             create_res = await client.post(
                 "/api/v1/tasks",
                 json={"workspace_path": str(ws), "prompt": "Resume test"},
@@ -261,9 +251,7 @@ async def test_submit_approval_not_awaiting_returns_400(tmp_path: Path):
 
     transport = ASGITransport(app=app)
     try:
-        async with AsyncClient(
-            transport=transport, base_url="http://testserver"
-        ) as client:
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
             create_res = await client.post(
                 "/api/v1/tasks",
                 json={"workspace_path": str(ws), "prompt": "Unstarted"},
@@ -275,9 +263,7 @@ async def test_submit_approval_not_awaiting_returns_400(tmp_path: Path):
                 json={"approved": True},
             )
             assert res.status_code == 400
-            msg = (
-                res.json().get("detail") or res.json().get("message") or str(res.json())
-            )
+            msg = res.json().get("detail") or res.json().get("message") or str(res.json())
             assert "not currently awaiting human approval" in msg
     finally:
         settings.WORKSPACE_BASE_PATH = original_base
@@ -298,9 +284,7 @@ async def test_events_on_unstarted_task_does_not_execute_graph(tmp_path: Path):
 
     transport = ASGITransport(app=app)
     try:
-        async with AsyncClient(
-            transport=transport, base_url="http://testserver"
-        ) as client:
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
             create_res = await client.post(
                 "/api/v1/tasks",
                 json={
@@ -352,9 +336,7 @@ async def test_events_after_start_acts_as_observer(tmp_path: Path):
 
     transport = ASGITransport(app=app)
     try:
-        async with AsyncClient(
-            transport=transport, base_url="http://testserver"
-        ) as client:
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
             create_res = await client.post(
                 "/api/v1/tasks",
                 json={"workspace_path": str(ws), "prompt": "Observe started"},
@@ -403,9 +385,7 @@ async def test_sequential_duplicate_run_calls_do_not_restart_task(
 
     transport = ASGITransport(app=app)
     try:
-        async with AsyncClient(
-            transport=transport, base_url="http://testserver"
-        ) as client:
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
             create_res = await client.post(
                 "/api/v1/tasks",
                 json={"workspace_path": str(ws), "prompt": "Duplicate test"},
@@ -454,9 +434,7 @@ async def test_concurrent_same_task_run_protection(tmp_path: Path):
 
     transport = ASGITransport(app=app)
     try:
-        async with AsyncClient(
-            transport=transport, base_url="http://testserver"
-        ) as client:
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
             create_res = await client.post(
                 "/api/v1/tasks",
                 json={
@@ -512,9 +490,7 @@ async def test_independent_tasks_execute_independently(tmp_path: Path):
 
     transport = ASGITransport(app=app)
     try:
-        async with AsyncClient(
-            transport=transport, base_url="http://testserver"
-        ) as client:
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
             r1 = await client.post(
                 "/api/v1/tasks", json={"workspace_path": str(ws1), "prompt": "Task 1"}
             )
@@ -551,9 +527,7 @@ async def test_task_status_reconciliation_recovers_stale_running(tmp_path: Path)
 
     transport = ASGITransport(app=app)
     try:
-        async with AsyncClient(
-            transport=transport, base_url="http://testserver"
-        ) as client:
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
             create_res = await client.post(
                 "/api/v1/tasks",
                 json={"workspace_path": str(ws), "prompt": "Reconciliation test"},
@@ -582,9 +556,7 @@ async def test_api_does_not_directly_execute_shell_or_write_files(tmp_path: Path
 
     transport = ASGITransport(app=app)
     try:
-        async with AsyncClient(
-            transport=transport, base_url="http://testserver"
-        ) as client:
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
             res = await client.post(
                 "/api/v1/tasks",
                 json={"workspace_path": str(ws), "prompt": "Safe API check"},
@@ -634,9 +606,7 @@ async def test_concurrent_same_task_approval_protection(tmp_path: Path):
 
     transport = ASGITransport(app=app)
     try:
-        async with AsyncClient(
-            transport=transport, base_url="http://testserver"
-        ) as client:
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
             create_res = await client.post(
                 "/api/v1/tasks",
                 json={"workspace_path": str(ws), "prompt": "Approval race test"},
@@ -646,12 +616,8 @@ async def test_concurrent_same_task_approval_protection(tmp_path: Path):
             await client.post(f"/api/v1/tasks/{task_id}/run")
 
             res_a, res_b = await asyncio.gather(
-                client.post(
-                    f"/api/v1/tasks/{task_id}/approval", json={"approved": True}
-                ),
-                client.post(
-                    f"/api/v1/tasks/{task_id}/approval", json={"approved": True}
-                ),
+                client.post(f"/api/v1/tasks/{task_id}/approval", json={"approved": True}),
+                client.post(f"/api/v1/tasks/{task_id}/approval", json={"approved": True}),
             )
 
             codes = {res_a.status_code, res_b.status_code}
@@ -703,9 +669,7 @@ async def test_duplicate_approval_after_interrupt_consumed_rejected(tmp_path: Pa
 
     transport = ASGITransport(app=app)
     try:
-        async with AsyncClient(
-            transport=transport, base_url="http://testserver"
-        ) as client:
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
             create_res = await client.post(
                 "/api/v1/tasks",
                 json={"workspace_path": str(ws), "prompt": "Single approval test"},
@@ -714,14 +678,10 @@ async def test_duplicate_approval_after_interrupt_consumed_rejected(tmp_path: Pa
 
             await client.post(f"/api/v1/tasks/{task_id}/run")
 
-            r1 = await client.post(
-                f"/api/v1/tasks/{task_id}/approval", json={"approved": True}
-            )
+            r1 = await client.post(f"/api/v1/tasks/{task_id}/approval", json={"approved": True})
             assert r1.status_code == 200
 
-            r2 = await client.post(
-                f"/api/v1/tasks/{task_id}/approval", json={"approved": True}
-            )
+            r2 = await client.post(f"/api/v1/tasks/{task_id}/approval", json={"approved": True})
             assert r2.status_code == 400
     finally:
         app.dependency_overrides.clear()
@@ -741,9 +701,7 @@ async def test_graph_unavailable_approval_error_path(tmp_path: Path):
 
     transport = ASGITransport(app=app)
     try:
-        async with AsyncClient(
-            transport=transport, base_url="http://testserver"
-        ) as client:
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
             create_res = await client.post(
                 "/api/v1/tasks",
                 json={"workspace_path": str(ws), "prompt": "No graph test"},
@@ -751,9 +709,7 @@ async def test_graph_unavailable_approval_error_path(tmp_path: Path):
             task_id = create_res.json()["id"]
 
             app.dependency_overrides[get_agent_graph] = lambda: None
-            res = await client.post(
-                f"/api/v1/tasks/{task_id}/approval", json={"approved": True}
-            )
+            res = await client.post(f"/api/v1/tasks/{task_id}/approval", json={"approved": True})
             assert res.status_code in (500, 400, 404)
     finally:
         app.dependency_overrides.clear()
@@ -775,9 +731,7 @@ async def test_sse_event_name_test_passed_and_test_failed(tmp_path: Path):
 
     transport = ASGITransport(app=app)
     try:
-        async with AsyncClient(
-            transport=transport, base_url="http://testserver"
-        ) as client:
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
             create_res = await client.post(
                 "/api/v1/tasks",
                 json={"workspace_path": str(ws), "prompt": "SSE test"},
@@ -823,9 +777,7 @@ async def test_double_run_request_does_not_execute_twice(tmp_path: Path):
 
     transport = ASGITransport(app=app)
     try:
-        async with AsyncClient(
-            transport=transport, base_url="http://testserver"
-        ) as client:
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
             create_res = await client.post(
                 "/api/v1/tasks",
                 json={"workspace_path": str(ws), "prompt": "Double run test"},
@@ -887,9 +839,7 @@ async def test_double_approval_request_rejected(tmp_path: Path):
 
     transport = ASGITransport(app=app)
     try:
-        async with AsyncClient(
-            transport=transport, base_url="http://testserver"
-        ) as client:
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
             create_res = await client.post(
                 "/api/v1/tasks",
                 json={"workspace_path": str(ws), "prompt": "Double approval test"},
@@ -910,11 +860,7 @@ async def test_double_approval_request_rejected(tmp_path: Path):
                 json={"approved": True, "feedback": "Duplicate attempt"},
             )
             assert appr2.status_code == 400
-            msg = (
-                appr2.json().get("detail")
-                or appr2.json().get("message")
-                or str(appr2.json())
-            )
+            msg = appr2.json().get("detail") or appr2.json().get("message") or str(appr2.json())
             assert "not currently awaiting human approval" in msg
     finally:
         app.dependency_overrides.clear()
@@ -1024,9 +970,7 @@ async def test_reconcile_task_status_full_matrix(
     if snap_next is None and snap_values is None:
         mock_graph.aget_state = AsyncMock(return_value=None)
     else:
-        mock_graph.aget_state = AsyncMock(
-            return_value=MockSnapshot(snap_values, snap_next)
-        )
+        mock_graph.aget_state = AsyncMock(return_value=MockSnapshot(snap_values, snap_next))
 
     reconciled = await TaskService.reconcile_task_status(mock_db, task, mock_graph)
     assert reconciled.status == expected_status

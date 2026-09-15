@@ -42,9 +42,7 @@ def init_test_git_repo(repo_path: Path) -> None:
         capture_output=True,
         check=True,
     )
-    subprocess.run(
-        ["git", "add", "."], cwd=str(repo_path), capture_output=True, check=True
-    )
+    subprocess.run(["git", "add", "."], cwd=str(repo_path), capture_output=True, check=True)
     subprocess.run(
         ["git", "commit", "-m", "initial commit"],
         cwd=str(repo_path),
@@ -60,9 +58,7 @@ def test_1_context_stage_gathers_relevant_files(tmp_path: Path):
     (ws / "pyproject.toml").write_text("[project]\nname='math'\n", encoding="utf-8")
     init_test_git_repo(ws)
 
-    ctx = build_repository_context(
-        str(ws), "Implement multiply function in math_utils.py"
-    )
+    ctx = build_repository_context(str(ws), "Implement multiply function in math_utils.py")
     paths = [f.path for f in ctx.relevant_files]
     assert "math_utils.py" in paths
     assert ctx.files_included >= 1
@@ -75,14 +71,10 @@ def test_2_task_specific_keyword_causes_relevant_file_selection(
     ws = tmp_path / "ws_kw"
     ws.mkdir(parents=True, exist_ok=True)
     (ws / "auth_service.py").write_text("def verify_jwt(): pass\n", encoding="utf-8")
-    (ws / "billing_service.py").write_text(
-        "def charge_card(): pass\n", encoding="utf-8"
-    )
+    (ws / "billing_service.py").write_text("def charge_card(): pass\n", encoding="utf-8")
     init_test_git_repo(ws)
 
-    ctx = build_repository_context(
-        str(ws), "Add token expiry validation in auth_service"
-    )
+    ctx = build_repository_context(str(ws), "Add token expiry validation in auth_service")
     assert len(ctx.relevant_files) >= 1
     assert ctx.relevant_files[0].path == "auth_service.py"
     assert ctx.relevant_files[0].relevance_score > 0.0
@@ -91,30 +83,21 @@ def test_2_task_specific_keyword_causes_relevant_file_selection(
 def test_3_irrelevant_files_ranked_below_relevant_files(tmp_path: Path):
     ws = tmp_path / "ws_rank"
     ws.mkdir(parents=True, exist_ok=True)
-    (ws / "user_repository.py").write_text(
-        "class UserRepository: pass\n", encoding="utf-8"
-    )
-    (ws / "image_optimizer.py").write_text(
-        "class ImageOptimizer: pass\n", encoding="utf-8"
-    )
+    (ws / "user_repository.py").write_text("class UserRepository: pass\n", encoding="utf-8")
+    (ws / "image_optimizer.py").write_text("class ImageOptimizer: pass\n", encoding="utf-8")
     init_test_git_repo(ws)
 
     ctx = build_repository_context(str(ws), "Fetch user by ID in user_repository.py")
     paths = [f.path for f in ctx.relevant_files]
     assert paths[0] == "user_repository.py"
     if "image_optimizer.py" in paths:
-        assert (
-            ctx.relevant_files[0].relevance_score
-            > ctx.relevant_files[1].relevance_score
-        )
+        assert ctx.relevant_files[0].relevance_score > ctx.relevant_files[1].relevance_score
 
 
 def test_4_duplicate_files_are_removed(tmp_path: Path):
     ws = tmp_path / "ws_dedup"
     ws.mkdir(parents=True, exist_ok=True)
-    (ws / "service.py").write_text(
-        "def service(): return 'service'\n", encoding="utf-8"
-    )
+    (ws / "service.py").write_text("def service(): return 'service'\n", encoding="utf-8")
     init_test_git_repo(ws)
 
     ctx = build_repository_context(str(ws), "service service service.py")
@@ -138,14 +121,10 @@ def test_6_maximum_total_context_size_is_respected(tmp_path: Path):
     ws = tmp_path / "ws_total_bytes"
     ws.mkdir(parents=True, exist_ok=True)
     for i in range(5):
-        (ws / f"file_{i}.py").write_text(
-            f"# file_{i}\n" + ("a = 1\n" * 100), encoding="utf-8"
-        )
+        (ws / f"file_{i}.py").write_text(f"# file_{i}\n" + ("a = 1\n" * 100), encoding="utf-8")
     init_test_git_repo(ws)
 
-    ctx = build_repository_context(
-        str(ws), "file check", max_total_bytes=1000, max_files=5
-    )
+    ctx = build_repository_context(str(ws), "file check", max_total_bytes=1000, max_files=5)
     assert ctx.total_context_bytes <= 1000
     assert ctx.truncated is True
 
@@ -157,9 +136,7 @@ def test_7_large_file_output_is_truncated_safely(tmp_path: Path):
     (ws / "big_module.py").write_text(large_content, encoding="utf-8")
     init_test_git_repo(ws)
 
-    ctx = build_repository_context(
-        str(ws), "big_module", max_file_bytes=500, max_total_bytes=10000
-    )
+    ctx = build_repository_context(str(ws), "big_module", max_file_bytes=500, max_total_bytes=10000)
     assert len(ctx.relevant_files) == 1
     rf = ctx.relevant_files[0]
     assert rf.truncated is True
@@ -272,9 +249,7 @@ async def test_14_planner_receives_repository_context(tmp_path: Path):
     async def mock_structured(prompt, response_schema, **kwargs):
         nonlocal captured_prompt
         captured_prompt = prompt
-        return PlannerOutput(
-            summary="Plan", steps=["S1"], files_expected=["calculator.py"]
-        )
+        return PlannerOutput(summary="Plan", steps=["S1"], files_expected=["calculator.py"])
 
     mock_gw.generate_structured = AsyncMock(side_effect=mock_structured)
     set_llm_gateway(mock_gw)
@@ -307,20 +282,14 @@ async def test_15_coder_receives_repository_context(tmp_path: Path):
     async def mock_structured(prompt, response_schema, **kwargs):
         nonlocal captured_prompt
         captured_prompt = prompt
-        return CoderOutput(
-            summary="Done", patch="diff", files_changed=["api_client.py"]
-        )
+        return CoderOutput(summary="Done", patch="diff", files_changed=["api_client.py"])
 
     mock_gw.generate_structured = AsyncMock(side_effect=mock_structured)
     set_llm_gateway(mock_gw)
 
-    state = create_initial_state(
-        "task-code", str(ws), "thread-code-1", "Refactor ApiClient"
-    )
+    state = create_initial_state("task-code", str(ws), "thread-code-1", "Refactor ApiClient")
     state["repository_context"] = ctx.model_dump()
-    state["plan"] = PlannerOutput(
-        summary="Plan", steps=["S1"], files_expected=["api_client.py"]
-    )
+    state["plan"] = PlannerOutput(summary="Plan", steps=["S1"], files_expected=["api_client.py"])
 
     res = await coder(state)
     assert res["current_step"] == 3
@@ -339,14 +308,10 @@ def test_16_graph_ordering_inspect_to_repository_context_to_planner():
     assert "repository_context" in nodes
     assert "planner" in nodes
 
-    inspect_targets = [
-        edge.target for edge in topology.edges if edge.source == "inspect_workspace"
-    ]
+    inspect_targets = [edge.target for edge in topology.edges if edge.source == "inspect_workspace"]
     assert inspect_targets == ["repository_context"]
 
-    repo_targets = [
-        edge.target for edge in topology.edges if edge.source == "repository_context"
-    ]
+    repo_targets = [edge.target for edge in topology.edges if edge.source == "repository_context"]
     assert repo_targets == ["planner"]
 
 
@@ -365,9 +330,7 @@ async def test_17_no_existing_hitl_behavior_regresses(tmp_path: Path):
         if response_schema is CoderOutput:
             return CoderOutput(
                 summary="C",
-                patch=(
-                    "--- a/core.py\n+++ b/core.py\n@@ -1 +1 @@\n-ORIGINAL\n+MUTATED\n"
-                ),
+                patch=("--- a/core.py\n+++ b/core.py\n@@ -1 +1 @@\n-ORIGINAL\n+MUTATED\n"),
                 files_changed=["core.py"],
             )
         return response_schema.model_validate({})
@@ -514,9 +477,7 @@ def test_23_candidate_files_evaluation_bound(tmp_path: Path):
     ctx_2 = build_repository_context(str(ws), "inspect file_0500", max_candidates=50)
 
     assert ctx_1.files_included <= 6
-    assert [f.path for f in ctx_1.relevant_files] == [
-        f.path for f in ctx_2.relevant_files
-    ]
+    assert [f.path for f in ctx_1.relevant_files] == [f.path for f in ctx_2.relevant_files]
 
 
 @pytest.mark.asyncio
@@ -538,9 +499,7 @@ async def test_24_untrusted_code_structural_delimiters_and_injection_resilience(
     async def mock_structured(prompt, response_schema, **kwargs):
         nonlocal captured_prompt
         captured_prompt = prompt
-        return PlannerOutput(
-            summary="Plan", steps=["S1"], files_expected=["security.py"]
-        )
+        return PlannerOutput(summary="Plan", steps=["S1"], files_expected=["security.py"])
 
     mock_gw.generate_structured = AsyncMock(side_effect=mock_structured)
     set_llm_gateway(mock_gw)
@@ -559,6 +518,8 @@ async def test_24_untrusted_code_structural_delimiters_and_injection_resilience(
     set_llm_gateway(None)
 
 
+@pytest.mark.postgres
+@pytest.mark.integration
 @pytest.mark.asyncio
 async def test_25_concurrent_run_task_returns_409(tmp_path: Path):
     """Remediation Req 3: Proves concurrent /run invocations on the same task reject with HTTP 409 Conflict."""
@@ -588,9 +549,7 @@ async def test_25_concurrent_run_task_returns_409(tmp_path: Path):
 
     transport = ASGITransport(app=app)
     try:
-        async with AsyncClient(
-            transport=transport, base_url="http://testserver"
-        ) as client:
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
             create_res = await client.post(
                 "/api/v1/tasks",
                 json={"workspace_path": str(ws), "prompt": "Race condition test"},
@@ -639,9 +598,7 @@ def test_26_search_code_contract_and_content_relevance(tmp_path: Path):
     assert "perform_complex_discount" in matched_rf.excerpt
 
     # 2. Verify signature invocation and workspace_root propagation
-    with patch(
-        "app.services.context_service.search_code", wraps=search_code
-    ) as spy_search:
+    with patch("app.services.context_service.search_code", wraps=search_code) as spy_search:
         build_repository_context(str(ws), "complex_discount")
         assert spy_search.called
         call_kwargs = spy_search.call_args[1]
@@ -661,13 +618,9 @@ def test_26_search_code_contract_and_content_relevance(tmp_path: Path):
         output={"matches": many_matches},
     )
     with patch("app.services.context_service.search_code", return_value=mock_res):
-        bounded_ctx = build_repository_context(
-            str(ws), "complex_discount", max_search_results=3
-        )
+        bounded_ctx = build_repository_context(str(ws), "complex_discount", max_search_results=3)
         assert bounded_ctx is not None
-        bounded_rf = next(
-            f for f in bounded_ctx.relevant_files if f.path == "internal_logic.py"
-        )
+        bounded_rf = next(f for f in bounded_ctx.relevant_files if f.path == "internal_logic.py")
         assert "3 search match(es)" in bounded_rf.reason
 
     # 4. Safe fallback if search_code raises an exception

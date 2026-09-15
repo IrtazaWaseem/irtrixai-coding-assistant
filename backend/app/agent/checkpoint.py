@@ -1,3 +1,5 @@
+"""PostgreSQL checkpointer manager for LangGraph agent persistence."""
+
 import logging
 import re
 from typing import Any
@@ -23,9 +25,7 @@ def sanitize_postgres_error(error: Exception | str) -> str:
         and len(settings.POSTGRES_PASSWORD) >= 4
     ):
         raw = raw.replace(settings.POSTGRES_PASSWORD, "[REDACTED_PASSWORD]")
-    sanitized = POSTGRES_CREDENTIAL_PATTERN.sub(
-        r"\1[REDACTED_USER]:[REDACTED_PASSWORD]@\4", raw
-    )
+    sanitized = POSTGRES_CREDENTIAL_PATTERN.sub(r"\1[REDACTED_USER]:[REDACTED_PASSWORD]@\4", raw)
     return sanitized
 
 
@@ -75,7 +75,18 @@ class PostgresCheckpointerManager:
             self._pool = pool
 
             saver = AsyncPostgresSaver(pool)
-            await saver.setup()
+            try:
+                await saver.setup()
+            except Exception as setup_err:
+                err_str = str(setup_err).lower()
+                if "checkpoint_migrations" in err_str and (
+                    "unique" in err_str or "duplicate" in err_str or "already exists" in err_str
+                ):
+                    logger.info(
+                        "PostgreSQL checkpointer migrations applied concurrently by another worker."
+                    )
+                else:
+                    raise
 
             self._checkpointer = saver
             self._initialized = True
@@ -103,9 +114,7 @@ class PostgresCheckpointerManager:
                 await self._pool.close()
                 logger.info("PostgreSQL checkpointer pool closed.")
             except Exception as err:
-                logger.warning(
-                    "Error closing checkpointer pool: %s", sanitize_postgres_error(err)
-                )
+                logger.warning("Error closing checkpointer pool: %s", sanitize_postgres_error(err))
             finally:
                 self._pool = None
                 self._checkpointer = None

@@ -47,9 +47,7 @@ def init_test_git_repo(repo_path: Path) -> None:
         capture_output=True,
         check=True,
     )
-    subprocess.run(
-        ["git", "add", "."], cwd=str(repo_path), capture_output=True, check=True
-    )
+    subprocess.run(["git", "add", "."], cwd=str(repo_path), capture_output=True, check=True)
     subprocess.run(
         ["git", "commit", "-m", "initial commit"],
         cwd=str(repo_path),
@@ -188,9 +186,7 @@ async def test_e2e_real_tool_chain_inspect_to_finalize(tmp_path: Path):
     )
 
     # Step B: Human Operator grants approval via Command(resume=...)
-    await graph.ainvoke(
-        Command(resume={"approved": True, "feedback": "LGTM"}), config=config
-    )
+    await graph.ainvoke(Command(resume={"approved": True, "feedback": "LGTM"}), config=config)
 
     final_snap = await graph.aget_state(config)
 
@@ -205,9 +201,7 @@ async def test_e2e_real_tool_chain_inspect_to_finalize(tmp_path: Path):
     assert final_snap.values["tool_result"]["tool_name"] == "execution_service"
 
     # Filesystem verification: Approved patch was authoritatively applied to disk
-    assert "def multiply(a: int, b: int) -> int:" in math_file.read_text(
-        encoding="utf-8"
-    )
+    assert "def multiply(a: int, b: int) -> int:" in math_file.read_text(encoding="utf-8")
 
     # Authoritative sandbox verification: execute_in_sandbox was called with exact signature
     mock_exec.execute_in_sandbox.assert_called_once_with(
@@ -232,8 +226,12 @@ async def test_e2e_repair_cycle_preserves_invariants(tmp_path: Path):
     init_test_git_repo(ws)
 
     # Initial buggy proposal, then corrected repair proposal
-    patch_v1 = "--- a/service.py\n+++ b/service.py\n@@ -1 +1 @@\n-STATUS = 'INIT'\n+STATUS = 'BUGGY'\n"
-    patch_v2 = "--- a/service.py\n+++ b/service.py\n@@ -1 +1 @@\n-STATUS = 'BUGGY'\n+STATUS = 'ACTIVE'\n"
+    patch_v1 = (
+        "--- a/service.py\n+++ b/service.py\n@@ -1 +1 @@\n-STATUS = 'INIT'\n+STATUS = 'BUGGY'\n"
+    )
+    patch_v2 = (
+        "--- a/service.py\n+++ b/service.py\n@@ -1 +1 @@\n-STATUS = 'BUGGY'\n+STATUS = 'ACTIVE'\n"
+    )
 
     coder_call_count = 0
     exec_call_count = 0
@@ -263,9 +261,7 @@ async def test_e2e_repair_cycle_preserves_invariants(tmp_path: Path):
     async def mock_structured(prompt, response_schema, **kwargs):
         nonlocal coder_call_count
         if response_schema is PlannerOutput:
-            return PlannerOutput(
-                summary="Plan", steps=["S1"], files_expected=["service.py"]
-            )
+            return PlannerOutput(summary="Plan", steps=["S1"], files_expected=["service.py"])
         if response_schema is CoderOutput:
             coder_call_count += 1
             patch = patch_v1 if coder_call_count == 1 else patch_v2
@@ -311,9 +307,7 @@ async def test_e2e_repair_cycle_preserves_invariants(tmp_path: Path):
     repair_snap = await graph.aget_state(config)
     assert repair_snap.next == ("approval_gate",)
     assert repair_snap.values["repair_count"] == 1
-    assert (
-        repair_snap.values["approval"] is None
-    )  # INVARIANT: Stale authorization cleared!
+    assert repair_snap.values["approval"] is None  # INVARIANT: Stale authorization cleared!
     assert repair_snap.values["pending_patch"] == patch_v2
     assert target.read_text(encoding="utf-8") == "STATUS = 'BUGGY'\n"
 
@@ -352,9 +346,7 @@ async def test_e2e_max_repair_exhaustion_terminates_failed(tmp_path: Path):
     async def mock_structured(prompt, response_schema, **kwargs):
         nonlocal coder_attempt
         if response_schema is PlannerOutput:
-            return PlannerOutput(
-                summary="Plan", steps=["S"], files_expected=["flaky.py"]
-            )
+            return PlannerOutput(summary="Plan", steps=["S"], files_expected=["flaky.py"])
         if response_schema is CoderOutput:
             coder_attempt += 1
             patch = f"--- a/flaky.py\n+++ b/flaky.py\n@@ -1 +1 @@\n-x = {coder_attempt - 1}\n+x = {coder_attempt}\n"
@@ -381,9 +373,7 @@ async def test_e2e_max_repair_exhaustion_terminates_failed(tmp_path: Path):
     thread_id = "thread-e2e-exhaust"
     config = {"configurable": {"thread_id": thread_id}}
 
-    await graph.ainvoke(
-        create_initial_state("task-ex", str(ws), thread_id), config=config
-    )
+    await graph.ainvoke(create_initial_state("task-ex", str(ws), thread_id), config=config)
 
     # Approve Initial -> fails -> repair 1
     await graph.ainvoke(Command(resume={"approved": True}), config=config)
@@ -439,9 +429,7 @@ async def test_e2e_rejected_patch_causes_zero_mutation(tmp_path: Path):
     thread_id = "thread-e2e-reject"
     config = {"configurable": {"thread_id": thread_id}}
 
-    await graph.ainvoke(
-        create_initial_state("task-rej", str(ws), thread_id), config=config
-    )
+    await graph.ainvoke(create_initial_state("task-rej", str(ws), thread_id), config=config)
 
     # Operator rejects proposal with approval=False and no feedback (or terminal abort signal)
     await graph.ainvoke(
@@ -494,9 +482,7 @@ async def test_e2e_checkpoint_state_msgpack_and_json_serializable(tmp_path: Path
     thread_id = "thread-e2e-serde"
     config = {"configurable": {"thread_id": thread_id}}
 
-    await graph.ainvoke(
-        create_initial_state("task-serde", str(ws), thread_id), config=config
-    )
+    await graph.ainvoke(create_initial_state("task-serde", str(ws), thread_id), config=config)
     await graph.ainvoke(Command(resume={"approved": True}), config=config)
 
     final_snap = await graph.aget_state(config)
@@ -517,6 +503,8 @@ async def test_e2e_checkpoint_state_msgpack_and_json_serializable(tmp_path: Path
     set_execution_service(None)
 
 
+@pytest.mark.docker
+@pytest.mark.integration
 @pytest.mark.asyncio
 async def test_e2e_live_docker_sandbox_execution(tmp_path: Path):
     """Executes live Docker sandbox through the complete end-to-end workflow if Docker is accessible."""
@@ -533,8 +521,7 @@ async def test_e2e_live_docker_sandbox_execution(tmp_path: Path):
 
     test_file = ws / "test_math_mod.py"
     test_file.write_text(
-        "from math_mod import multiply\n\n"
-        "def test_multiply():\n    assert multiply(3, 4) == 12\n",
+        "from math_mod import multiply\n\ndef test_multiply():\n    assert multiply(3, 4) == 12\n",
         encoding="utf-8",
     )
     init_test_git_repo(ws)

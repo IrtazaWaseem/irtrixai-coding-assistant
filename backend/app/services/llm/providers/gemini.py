@@ -1,301 +1,328 @@
+"""Google Gemini LLM provider implementation.
+
+Integrates with the Google GenAI SDK to support text generation, structured JSON
+output, and token streaming. Handles optional SDK availability so mocked testing
+can execute without requiring google-genai to be installed in the runtime environment.
+"""
+
+import json
 import logging
+import re
 from collections.abc import AsyncIterator
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from app.core.exceptions import (
     LLMAuthenticationException,
-    LLMConfigurationException,
     LLMConnectionException,
-    LLMException,
     LLMInvalidModelException,
+    LLMProviderException,
     LLMProviderUnavailableException,
     LLMRateLimitException,
     LLMResponseException,
-    LLMTimeoutException,
-    LLMUnsupportedCapabilityException,
 )
-from app.schemas.llm import (
-    LLMConfig,
-    LLMResponse,
-    LLMStreamChunk,
-    ModelInfo,
-    ProviderCapabilities,
-)
-from app.services.llm.base import LLMProvider, sanitize_secret
+from app.schemas.llm import LLMConfig, LLMResponse, ModelInfo
+from app.services.llm.base import LLMProvider
 
 logger = logging.getLogger(__name__)
 
 
+def _get_genai_types() -> Any:
+    """Returns google.genai.types if installed, or a mock-compatible fallback object.
+
+    Prevents ModuleNotFoundError in environments where google-genai is not installed
+    while maintaining full compatibility with injected mock clients.
+    """
+    try:
+        from google.genai import types
+
+        return types
+    except ImportError:
+
+        class _FallbackGenerateContentConfig:
+            def __init__(self, **kwargs: Any) -> None:
+                for key, value in kwargs.items():
+                    setattr(self, key, value)
+
+        class _FallbackTypes:
+            GenerateContentConfig = _FallbackGenerateContentConfig
+
+            def __getattr__(self, name: str) -> Any:
+                return _FallbackGenerateContentConfig
+
+        return _FallbackTypes
+
+
 class GeminiProvider(LLMProvider):
-    """Adapter for Google Gemini using modern official google-genai SDK."""
+    """LLM provider implementation for Google Gemini models via google-genai SDK."""
 
-    def __init__(self, config: LLMConfig, client: Any = None) -> None:
-        super().__init__(config)
-        self.api_key = config.api_key
-        if not self.api_key:
-            raise LLMAuthenticationException(
-                "Gemini API key is required. Set GEMINI_API_KEY in environment or .env."
-            )
-
-        self._capabilities = ProviderCapabilities(
-            supports_streaming=True,
-            supports_structured_output=True,
-            supports_tools=True,
-            supports_system_messages=True,
-        )
-
-        if client is not None:
-            self._client = client
-        else:
-            try:
-                from google import genai
-
-                self._client = genai.Client(api_key=self.api_key)
-            except ImportError as err:
-                raise LLMConfigurationException(
-                    "google-genai SDK is not installed. "
-                    "Add 'google-genai' to requirements."
-                ) from err
-
-    @property
-    def capabilities(self) -> ProviderCapabilities:
-        return self._capabilities
-
-    def get_model_info(self) -> ModelInfo:
-        return ModelInfo(
-            provider=self.provider_name,
-            model=self.model,
-            display_name=f"Google Gemini ({self.model})",
-            capabilities=self.capabilities,
-        )
-
-    def _get_thinking_config(self) -> Any:
-        """Configures thinking budgets based on configured thinking_level."""
-        try:
-            from google.genai import types
-
-            budget_map = {"low": 1024, "medium": 4096, "high": 8192}
-            budget = budget_map.get(self.config.thinking_level or "low", 1024)
-            return types.ThinkingConfig(thinking_budget=budget)
-        except Exception:
-            return None
-
-    def _map_error(self, err: Exception) -> LLMException:
-        """Normalizes Gemini exceptions into internal hierarchy without secret leakage."""
-        if isinstance(
-            err,
-            (
-                LLMTimeoutException,
-                LLMAuthenticationException,
-                LLMInvalidModelException,
-                LLMProviderUnavailableException,
-                LLMConnectionException,
-                LLMRateLimitException,
-                LLMResponseException,
-                LLMUnsupportedCapabilityException,
-            ),
-        ):
-            return err
-
-        sec = sanitize_secret(str(err), self.api_key)
-
-        if isinstance(err, TimeoutError):
-            return LLMTimeoutException(f"Gemini request timed out: {sec}")
-
-        # 1. Direct status code check on exception attributes if present
-        raw_code = getattr(err, "status_code", None) or getattr(err, "code", None)
-        if raw_code is not None:
-            try:
-                code_val = (
-                    int(raw_code.value) if hasattr(raw_code, "value") else int(raw_code)
-                )
-                if code_val in (401, 403):
-                    return LLMAuthenticationException(
-                        f"Gemini authentication failed ({code_val}): {sec}"
-                    )
-                if code_val == 404:
-                    return LLMInvalidModelException(
-                        f"Gemini model '{self.model}' not found ({code_val}): {sec}"
-                    )
-                if code_val == 429:
-                    return LLMRateLimitException(f"Gemini rate limit exceeded: {sec}")
-                if code_val in (502, 503, 504):
-                    return LLMProviderUnavailableException(
-                        f"Gemini service unavailable ({code_val}): {sec}"
-                    )
-            except (ValueError, TypeError):
-                pass
-
-        # 2. Substring fallback for wrapped or unstructured gRPC exceptions
-        lowered = str(err).lower()
-        if (
-            "api_key" in lowered
-            or "unauthorized" in lowered
-            or "permission denied" in lowered
-        ):
-            return LLMAuthenticationException(f"Gemini authentication failed: {sec}")
-        if (
-            "not found" in lowered
-            or "model not supported" in lowered
-            or "unknown model" in lowered
-        ):
-            return LLMInvalidModelException(
-                f"Gemini model '{self.model}' is invalid: {sec}"
-            )
-        if "quota" in lowered or "resource_exhausted" in lowered:
-            return LLMRateLimitException(f"Gemini quota exceeded: {sec}")
-        if "unavailable" in lowered or "overloaded" in lowered or "503" in lowered:
-            return LLMProviderUnavailableException(
-                f"Gemini service temporarily unavailable: {sec}"
-            )
-        if "connection" in lowered or "econnrefused" in lowered:
-            return LLMConnectionException(f"Failed to connect to Gemini: {sec}")
-
-        return LLMResponseException(f"Gemini returned an unexpected error: {sec}")
-
-    async def generate(
+    def __init__(
         self,
-        prompt: str,
-        *,
-        system_instruction: str | None = None,
-        temperature: float | None = None,
-        max_output_tokens: int | None = None,
-    ) -> LLMResponse:
+        config: LLMConfig,
+        client: Any | None = None,
+    ) -> None:
+        """Initializes the Gemini provider.
+
+        Args:
+            config: Configuration settings for model execution.
+            client: Optional pre-configured or mocked GenAI client instance.
+        """
+        super().__init__(config=config)
+        self._client = client
+        if self._client is None and not (self.config.api_key and self.config.api_key.strip()):
+            raise LLMAuthenticationException("Gemini API key is required")
+
+    def _get_client(self) -> Any:
+        """Returns the active GenAI client or initializes a production client lazily."""
+        if self._client is not None:
+            return self._client
+
         try:
-            from google.genai import types
+            from google import genai
 
-            config_params: dict[str, Any] = {}
-            if system_instruction:
-                config_params["system_instruction"] = system_instruction
-            if temperature is not None:
-                config_params["temperature"] = temperature
-            if max_output_tokens is not None:
-                config_params["max_output_tokens"] = max_output_tokens
+            return genai.Client(api_key=self.config.api_key)
+        except ImportError as err:
+            raise LLMProviderException(
+                "The 'google-genai' package is required to use GeminiProvider without a mock client. "
+                "Install it via: pip install google-genai"
+            ) from err
 
-            thinking_cfg = self._get_thinking_config()
-            if thinking_cfg:
-                config_params["thinking_config"] = thinking_cfg
+    def _map_error(self, err: Exception) -> Exception:
+        """Translates upstream GenAI and HTTP errors into normalized domain exceptions.
 
-            config = types.GenerateContentConfig(**config_params)
+        Args:
+            err: Raw exception raised during client communication.
 
-            response = await self._client.aio.models.generate_content(
-                model=self.model,
+        Returns:
+            Normalized domain exception (RateLimit, Authentication, Connection, Model, or Provider).
+        """
+        err_msg = str(err)
+        if self.config.api_key and self.config.api_key in err_msg:
+            err_msg = err_msg.replace(self.config.api_key, "[REDACTED]")
+        lower_msg = err_msg.lower()
+        err_code = (
+            getattr(err, "status_code", None)
+            or getattr(err, "code", None)
+            or getattr(err, "http_status", None)
+        )
+        if hasattr(err, "response") and hasattr(err.response, "status_code"):
+            err_code = err.response.status_code
+
+        if (
+            err_code in (502, 503, 504)
+            or "unavailable" in lower_msg
+            or "service unavailable" in lower_msg
+        ):
+            return LLMProviderUnavailableException(f"Gemini service unavailable: {err_msg}")
+
+        if err_code == 404 or "not found" in lower_msg or "not_found" in lower_msg:
+            return LLMInvalidModelException(f"Gemini model not found: {err_msg}")
+
+        if (
+            err_code == 429
+            or "quota" in lower_msg
+            or "resourceexhausted" in lower_msg
+            or "resource_exhausted" in lower_msg
+            or "rate" in lower_msg
+            or "too many requests" in lower_msg
+        ):
+            return LLMRateLimitException(f"Gemini rate limit or quota exceeded: {err_msg}")
+
+        if (
+            err_code in (401, 403)
+            or "api_key" in lower_msg
+            or "unauthenticated" in lower_msg
+            or "invalid api key" in lower_msg
+            or "permission_denied" in lower_msg
+            or "permission denied" in lower_msg
+        ):
+            return LLMAuthenticationException(f"Gemini authentication failed: {err_msg}")
+
+        if (
+            "connection" in lower_msg
+            or "connect" in lower_msg
+            or "network" in lower_msg
+            or "timeout" in lower_msg
+            or "unreachable" in lower_msg
+        ):
+            return LLMConnectionException(f"Gemini connection error: {err_msg}")
+
+        return LLMProviderException(f"Gemini provider error: {err_msg}")
+
+    def _extract_json_from_text(self, text: str) -> str:
+        """Strips markdown fences and reasoning blocks to locate the raw JSON payload."""
+        cleaned = text.strip()
+        cleaned = re.sub(r"<think>[\s\S]*?</think>", "", cleaned).strip()
+        fence_match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", cleaned)
+        if fence_match:
+            cleaned = fence_match.group(1).strip()
+        return cleaned
+
+    async def generate(self, prompt: str, **kwargs: Any) -> LLMResponse:
+        """Executes a single text generation request against Gemini.
+
+        Args:
+            prompt: Text prompt to send to the model.
+            **kwargs: Extra parameters passed to the request.
+
+        Returns:
+            LLMResponse containing the text output and metadata.
+        """
+        client = self._get_client()
+        types = _get_genai_types()
+        config_params: dict[str, Any] = {}
+        if "temperature" in kwargs:
+            config_params["temperature"] = kwargs["temperature"]
+        if "max_tokens" in kwargs:
+            config_params["max_output_tokens"] = kwargs["max_tokens"]
+        config = types.GenerateContentConfig(**config_params)
+
+        try:
+            response = await client.aio.models.generate_content(
+                model=self.config.model,
                 contents=prompt,
                 config=config,
             )
-
-            text = response.text or ""
-
-            finish_reason = "STOP"
-            if (
-                hasattr(response, "candidates")
-                and response.candidates
-                and hasattr(response.candidates[0], "finish_reason")
-                and response.candidates[0].finish_reason
-            ):
-                finish_reason = str(response.candidates[0].finish_reason)
+            raw_text = response.text or ""
 
             raw_usage = None
-            if hasattr(response, "usage_metadata") and response.usage_metadata:
+            if hasattr(response, "usage_metadata") and response.usage_metadata is not None:
+                usage = response.usage_metadata
+                prompt_tokens = getattr(usage, "prompt_token_count", 0)
+                completion_tokens = getattr(usage, "candidates_token_count", 0)
+                total_tokens = getattr(
+                    usage, "total_token_count", prompt_tokens + completion_tokens
+                )
                 raw_usage = {
-                    "prompt_tokens": getattr(
-                        response.usage_metadata, "prompt_token_count", None
-                    ),
-                    "completion_tokens": getattr(
-                        response.usage_metadata, "candidates_token_count", None
-                    ),
-                    "total_tokens": getattr(
-                        response.usage_metadata, "total_token_count", None
-                    ),
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "total_tokens": total_tokens,
                 }
 
             return LLMResponse(
-                content=text,
-                model=self.model,
-                provider=self.provider_name,
-                finish_reason=finish_reason,
+                content=raw_text,
+                model=self.config.model,
+                provider="gemini",
+                raw_response=response,
                 raw_usage=raw_usage,
             )
-        except Exception as e:
-            raise self._map_error(e) from e
+        except Exception as err:
+            raise self._map_error(err) from err
 
     async def generate_structured[T: BaseModel](
-        self,
-        prompt: str,
-        response_schema: type[T],
-        *,
-        system_instruction: str | None = None,
-        temperature: float | None = None,
+        self, prompt: str, response_schema: type[T], **kwargs: Any
     ) -> T:
+        """Generates content and enforces strict validation against a Pydantic schema.
+
+        Args:
+            prompt: Text prompt containing instruction instructions.
+            response_schema: Target Pydantic model type.
+            **kwargs: Extra parameters passed to the generation request.
+
+        Returns:
+            Validated instance of response_schema.
+        """
+        client = self._get_client()
+        types = _get_genai_types()
+        config_params: dict[str, Any] = {
+            "response_mime_type": "application/json",
+            "response_schema": response_schema,
+        }
+        if "temperature" in kwargs:
+            config_params["temperature"] = kwargs["temperature"]
+        if "max_tokens" in kwargs:
+            config_params["max_output_tokens"] = kwargs["max_tokens"]
+        config = types.GenerateContentConfig(**config_params)
+
         try:
-            from google.genai import types
-
-            config_params: dict[str, Any] = {
-                "response_mime_type": "application/json",
-                "response_schema": response_schema,
-            }
-            if system_instruction:
-                config_params["system_instruction"] = system_instruction
-            if temperature is not None:
-                config_params["temperature"] = temperature
-
-            thinking_cfg = self._get_thinking_config()
-            if thinking_cfg:
-                config_params["thinking_config"] = thinking_cfg
-
-            config = types.GenerateContentConfig(**config_params)
-
-            response = await self._client.aio.models.generate_content(
-                model=self.model,
+            response = await client.aio.models.generate_content(
+                model=self.config.model,
                 contents=prompt,
                 config=config,
             )
+            raw_text = response.text or ""
+            if not raw_text.strip():
+                raise LLMResponseException("Gemini returned empty structured content")
 
-            text = response.text or ""
-            if not text:
-                raise LLMResponseException("Gemini returned empty structured output.")
+            cleaned_text = self._extract_json_from_text(raw_text)
+            try:
+                data = json.loads(cleaned_text)
+            except json.JSONDecodeError as err:
+                raise LLMResponseException(
+                    f"Failed to parse Gemini structured JSON: {err}",
+                    details={"raw_content": raw_text[:500]},
+                ) from err
 
-            return response_schema.model_validate_json(text)
-        except Exception as e:
-            raise self._map_error(e) from e
+            if not isinstance(data, dict):
+                raise LLMResponseException(
+                    f"Expected JSON object for schema '{response_schema.__name__}', "
+                    f"received '{type(data).__name__}'."
+                )
 
-    async def stream(
-        self,
-        prompt: str,
-        *,
-        system_instruction: str | None = None,
-        temperature: float | None = None,
-        max_output_tokens: int | None = None,
-    ) -> AsyncIterator[LLMStreamChunk]:
+            try:
+                return response_schema.model_validate(data)
+            except ValidationError as err:
+                raise LLMResponseException(
+                    f"Gemini output violates schema '{response_schema.__name__}': {err}",
+                    details={"validation_errors": err.errors(include_url=False)},
+                ) from err
+        except Exception as err:
+            if isinstance(err, LLMResponseException):
+                raise
+            raise self._map_error(err) from err
+
+    async def stream(self, prompt: str, **kwargs: Any) -> AsyncIterator[str]:
+        """Streams text chunks incrementally as they are produced by Gemini.
+
+        Args:
+            prompt: Text prompt for generation.
+            **kwargs: Extra parameters passed to the request.
+
+        Yields:
+            Incremental string tokens as they arrive.
+        """
+        client = self._get_client()
+        types = _get_genai_types()
+        config_params: dict[str, Any] = {}
+        if "temperature" in kwargs:
+            config_params["temperature"] = kwargs["temperature"]
+        if "max_tokens" in kwargs:
+            config_params["max_output_tokens"] = kwargs["max_tokens"]
+        config = types.GenerateContentConfig(**config_params)
+
         try:
-            from google.genai import types
-
-            config_params: dict[str, Any] = {}
-            if system_instruction:
-                config_params["system_instruction"] = system_instruction
-            if temperature is not None:
-                config_params["temperature"] = temperature
-            if max_output_tokens is not None:
-                config_params["max_output_tokens"] = max_output_tokens
-
-            thinking_cfg = self._get_thinking_config()
-            if thinking_cfg:
-                config_params["thinking_config"] = thinking_cfg
-
-            config = types.GenerateContentConfig(**config_params)
-
-            stream_iter = await self._client.aio.models.generate_content_stream(
-                model=self.model,
+            response = await client.aio.models.generate_content_stream(
+                model=self.config.model,
                 contents=prompt,
                 config=config,
             )
+            async for chunk in response:
+                if chunk.text:
+                    yield chunk.text
+        except Exception as err:
+            raise self._map_error(err) from err
 
-            async for chunk in stream_iter:
-                delta_text = chunk.text or ""
-                yield LLMStreamChunk(delta=delta_text, finish_reason=None)
+    @property
+    def capabilities(self) -> dict[str, Any]:
+        """Returns the capabilities profile for Google Gemini models."""
+        return {
+            "supports_streaming": True,
+            "supports_structured_output": True,
+            "supports_tools": True,
+            "supports_system_messages": True,
+        }
 
-            yield LLMStreamChunk(delta="", finish_reason="STOP")
-        except Exception as e:
-            raise self._map_error(e) from e
+    @property
+    def display_name(self) -> str:
+        """Returns the canonical display name for the Gemini model."""
+        return f"Google Gemini ({self.config.model})"
+
+    def get_model_info(self) -> ModelInfo:
+        """Returns normalized model metadata matching the provider specification."""
+        info = super().get_model_info()
+        try:
+            info.display_name = f"Google Gemini ({self.config.model})"
+            return info
+        except Exception:
+            return info.model_copy(update={"display_name": f"Google Gemini ({self.config.model})"})

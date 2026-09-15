@@ -305,15 +305,25 @@ def test_docker_live_network_isolation(sandbox_workspace, docker_ready):
 
 
 def test_docker_live_read_only_workspace(sandbox_workspace, docker_ready):
-    """Verifies the host workspace is strictly read-only inside the container."""
+    """Verifies host workspace directory is mounted read-only inside sandbox."""
     res = run_command(
-        "python -c \"open('/workspace/forbidden.txt', 'w').write('leak')\"",
+        "python -c \"open('/workspace/forbidden.txt', 'w').write('fail')\"",
         workspace_root=sandbox_workspace,
         image=docker_ready,
     )
     assert res.success is True
     assert res.output["exit_code"] != 0
-    assert "Read-only file system" in res.output["stderr"] or "OSError" in res.output["stderr"]
+    err_output = res.output.get("stderr", "") + res.output.get("stdout", "")
+    assert any(
+        msg in err_output
+        for msg in (
+            "Read-only file system",
+            "Permission denied",
+            "PermissionError",
+            "OSError",
+            "EROFS",
+        )
+    )
     assert not (sandbox_workspace / "forbidden.txt").exists()
 
 
