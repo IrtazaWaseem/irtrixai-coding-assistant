@@ -49,9 +49,7 @@ def init_test_git_repo(repo_path: Path) -> None:
         capture_output=True,
         check=True,
     )
-    subprocess.run(
-        ["git", "add", "."], cwd=str(repo_path), capture_output=True, check=True
-    )
+    subprocess.run(["git", "add", "."], cwd=str(repo_path), capture_output=True, check=True)
     subprocess.run(
         ["git", "commit", "-m", "initial commit"],
         cwd=str(repo_path),
@@ -93,9 +91,7 @@ async def test_test_runner_real_passing_command_produces_success(tmp_path: Path)
     state = create_initial_state("task-tr-1", str(tmp_path), "th-tr-1")
     state["test_command"] = "pytest"
 
-    res = await test_runner(
-        state, config={"configurable": {"execution_service": mock_exec}}
-    )
+    res = await test_runner(state, config={"configurable": {"execution_service": mock_exec}})
 
     tr = res["test_result"]
     assert tr["success"] is True
@@ -119,9 +115,7 @@ async def test_test_runner_failing_command_produces_failure(tmp_path: Path):
     state = create_initial_state("task-tr-2", str(tmp_path), "th-tr-2")
     state["test_command"] = "pytest"
 
-    res = await test_runner(
-        state, config={"configurable": {"execution_service": mock_exec}}
-    )
+    res = await test_runner(state, config={"configurable": {"execution_service": mock_exec}})
 
     tr = res["test_result"]
     assert tr["success"] is False
@@ -238,9 +232,7 @@ async def test_repair_count_governance_and_max_exhaustion(tmp_path: Path):
     async def mock_structured(prompt, response_schema, **kwargs):
         nonlocal coder_attempt
         if response_schema is PlannerOutput:
-            return PlannerOutput(
-                summary="Plan", steps=["Step"], files_expected=["flaky.py"]
-            )
+            return PlannerOutput(summary="Plan", steps=["Step"], files_expected=["flaky.py"])
         if response_schema is CoderOutput:
             coder_attempt += 1
             if coder_attempt == 1:
@@ -273,9 +265,7 @@ async def test_repair_count_governance_and_max_exhaustion(tmp_path: Path):
     config = {"configurable": {"thread_id": thread_id}}
     graph = build_agent_graph()
 
-    await graph.ainvoke(
-        create_initial_state("task-ex", str(tmp_path), thread_id), config=config
-    )
+    await graph.ainvoke(create_initial_state("task-ex", str(tmp_path), thread_id), config=config)
     assert (await graph.aget_state(config)).next == ("approval_gate",)
 
     # Approve Initial attempt -> fails -> repair 1
@@ -324,20 +314,14 @@ async def test_repair_patch_requires_hitl_before_mutation(tmp_path: Path):
         command=["pytest"],
     )
 
-    initial_patch = (
-        "--- a/guard.py\n+++ b/guard.py\n@@ -1 +1 @@\n-VAL = 100\n+VAL = 150\n"
-    )
-    repair_patch = (
-        "--- a/guard.py\n+++ b/guard.py\n@@ -1 +1 @@\n-VAL = 150\n+VAL = 200\n"
-    )
+    initial_patch = "--- a/guard.py\n+++ b/guard.py\n@@ -1 +1 @@\n-VAL = 100\n+VAL = 150\n"
+    repair_patch = "--- a/guard.py\n+++ b/guard.py\n@@ -1 +1 @@\n-VAL = 150\n+VAL = 200\n"
     coder_call_count = 0
 
     async def mock_structured(prompt, response_schema, **kwargs):
         nonlocal coder_call_count
         if response_schema is PlannerOutput:
-            return PlannerOutput(
-                summary="Plan", steps=["Step"], files_expected=["guard.py"]
-            )
+            return PlannerOutput(summary="Plan", steps=["Step"], files_expected=["guard.py"])
         if response_schema is CoderOutput:
             coder_call_count += 1
             patch = initial_patch if coder_call_count == 1 else repair_patch
@@ -363,9 +347,7 @@ async def test_repair_patch_requires_hitl_before_mutation(tmp_path: Path):
     config = {"configurable": {"thread_id": thread_id}}
     graph = build_agent_graph()
 
-    await graph.ainvoke(
-        create_initial_state("task-hg", str(tmp_path), thread_id), config=config
-    )
+    await graph.ainvoke(create_initial_state("task-hg", str(tmp_path), thread_id), config=config)
     # Approve initial -> fails -> debugger -> coder -> pauses at approval_gate
     await graph.ainvoke(Command(resume={"approved": True}), config=config)
 
@@ -394,16 +376,18 @@ async def test_repair_patch_rejection_causes_zero_mutation(tmp_path: Path):
         command=["pytest"],
     )
 
-    initial_patch = "--- a/reject_me.py\n+++ b/reject_me.py\n@@ -1 +1 @@\n-SAFE = True\n+SAFE = False\n"
-    repair_patch = "--- a/reject_me.py\n+++ b/reject_me.py\n@@ -1 +1 @@\n-SAFE = False\n+SAFE = None\n"
+    initial_patch = (
+        "--- a/reject_me.py\n+++ b/reject_me.py\n@@ -1 +1 @@\n-SAFE = True\n+SAFE = False\n"
+    )
+    repair_patch = (
+        "--- a/reject_me.py\n+++ b/reject_me.py\n@@ -1 +1 @@\n-SAFE = False\n+SAFE = None\n"
+    )
     coder_call_count = 0
 
     async def mock_structured(prompt, response_schema, **kwargs):
         nonlocal coder_call_count
         if response_schema is PlannerOutput:
-            return PlannerOutput(
-                summary="P", steps=["S"], files_expected=["reject_me.py"]
-            )
+            return PlannerOutput(summary="P", steps=["S"], files_expected=["reject_me.py"])
         if response_schema is CoderOutput:
             coder_call_count += 1
             patch = initial_patch if coder_call_count == 1 else repair_patch
@@ -413,9 +397,7 @@ async def test_repair_patch_rejection_causes_zero_mutation(tmp_path: Path):
                 files_changed=["reject_me.py"],
             )
         if response_schema is DebuggerOutput:
-            return DebuggerOutput(
-                diagnosis="D", proposed_fix="F", files_to_change=["reject_me.py"]
-            )
+            return DebuggerOutput(diagnosis="D", proposed_fix="F", files_to_change=["reject_me.py"])
         return response_schema.model_validate({})
 
     mock_gw = MagicMock(spec=LLMGateway)
@@ -427,9 +409,7 @@ async def test_repair_patch_rejection_causes_zero_mutation(tmp_path: Path):
     config = {"configurable": {"thread_id": thread_id}}
     graph = build_agent_graph()
 
-    await graph.ainvoke(
-        create_initial_state("task-rr", str(tmp_path), thread_id), config=config
-    )
+    await graph.ainvoke(create_initial_state("task-rr", str(tmp_path), thread_id), config=config)
     # Approve initial -> applied (file now has SAFE = False) -> test fails -> enters repair cycle 1
     await graph.ainvoke(Command(resume={"approved": True}), config=config)
 
@@ -475,12 +455,8 @@ async def test_repair_cycle_with_checkpoint_resume(tmp_path: Path):
     mock_exec = MagicMock()
     mock_exec.execute_in_sandbox.side_effect = mock_exec_fn
 
-    initial_patch = (
-        "--- a/persisted.py\n+++ b/persisted.py\n@@ -1 +1 @@\n-x = 1\n+x = 10\n"
-    )
-    repair_patch = (
-        "--- a/persisted.py\n+++ b/persisted.py\n@@ -1 +1 @@\n-x = 10\n+x = 2\n"
-    )
+    initial_patch = "--- a/persisted.py\n+++ b/persisted.py\n@@ -1 +1 @@\n-x = 1\n+x = 10\n"
+    repair_patch = "--- a/persisted.py\n+++ b/persisted.py\n@@ -1 +1 @@\n-x = 10\n+x = 2\n"
     coder_call_count = 0
 
     mock_gw = MagicMock(spec=LLMGateway)
@@ -488,9 +464,7 @@ async def test_repair_cycle_with_checkpoint_resume(tmp_path: Path):
     async def mock_structured(prompt, response_schema, **kwargs):
         nonlocal coder_call_count
         if response_schema is PlannerOutput:
-            return PlannerOutput(
-                summary="Plan", steps=["S"], files_expected=["persisted.py"]
-            )
+            return PlannerOutput(summary="Plan", steps=["S"], files_expected=["persisted.py"])
         if response_schema is CoderOutput:
             coder_call_count += 1
             patch = initial_patch if coder_call_count == 1 else repair_patch
@@ -524,9 +498,7 @@ async def test_repair_cycle_with_checkpoint_resume(tmp_path: Path):
     shared_saver = MemorySaver()
 
     graph_a = build_agent_graph(checkpointer=shared_saver)
-    await graph_a.ainvoke(
-        create_initial_state("task-pr", str(tmp_path), thread_id), config=config
-    )
+    await graph_a.ainvoke(create_initial_state("task-pr", str(tmp_path), thread_id), config=config)
     await graph_a.ainvoke(Command(resume={"approved": True}), config=config)
     assert (await graph_a.aget_state(config)).next == ("approval_gate",)
     assert (await graph_a.aget_state(config)).values["repair_count"] == 1
@@ -544,9 +516,10 @@ async def test_repair_cycle_with_checkpoint_resume(tmp_path: Path):
     set_execution_service(None)
 
 
+@pytest.mark.docker
 @pytest.mark.asyncio
 async def test_live_docker_end_to_end_repair_loop(tmp_path: Path):
-    """Executes live Docker sandbox through the repair loop if Docker daemon is responsive."""
+    """Proves real live Docker execution with non-zero exit code triggers full agent repair cycle."""
     if not is_docker_daemon_accessible():
         pytest.skip("Docker daemon is not accessible.")
 
