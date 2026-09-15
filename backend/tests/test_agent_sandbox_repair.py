@@ -574,7 +574,7 @@ async def test_live_docker_end_to_end_repair_loop(tmp_path: Path):
     graph = build_agent_graph()
 
     state = create_initial_state("task-live", str(tmp_path), thread_id)
-    state["test_command"] = "pytest"
+    state["test_command"] = "pytest -p no:cacheprovider"
     await graph.ainvoke(state, config=config)
 
     # Approve initial (solution.py becomes return 0 -> test fails in Docker) -> debugger -> coder -> pauses at approval_gate
