@@ -1,35 +1,54 @@
-export type TaskStatus =
-  | "pending"
-  | "running"
-  | "awaiting_approval"
-  | "completed"
-  | "failed"
-  | "cancelled";
-
 export interface TaskResponse {
   id: string;
-  workspace_path: string;
-  prompt: string;
-  thread_id: string;
+  workspace_id?: string;
+  prompt?: string;
   status: string;
-  error?: string | null;
-  created_at: string;
-  updated_at: string;
+  created_at?: string;
+  updated_at?: string;
+  interrupt_payload?: {
+    pending_patch?: string;
+    coder_summary?: string;
+    [key: string]: any;
+  };
+  test_result?: any;
+  final_result?: any;
+  review_summary?: any;
+}
+
+export interface ExecutionResponse {
+  task_id: string;
+  status: string;
+  node?: string;
+  interrupt_payload?: any;
+  final_result?: any;
 }
 
 export interface ApprovalRequest {
   approved: boolean;
-  feedback?: string | null;
+  feedback?: string;
 }
 
-export interface InterruptPayload {
-  action: string;
-  pending_patch?: string | null;
-  coder_summary?: string | null;
+export interface ActivityEvent {
+  id: string;
+  timestamp: string;
+  type: string;
+  title: string;
+  description?: string;
+  status: "success" | "warning" | "error" | "info";
+  metadata?: Record<string, any>;
+}
+
+export interface TestResultData {
+  success: boolean;
+  exit_code: number;
+  command?: string;
+  stdout?: string;
+  stderr?: string;
+  output?: string;
 }
 
 export interface ReviewResult {
-  verdict: "approved" | "rejected" | "changes_requested";
+  verdict: string;
   summary: string;
   issues: string[];
   security_concerns: string[];
@@ -41,35 +60,51 @@ export interface FinalResult {
   summary: string;
   files_changed: string[];
   tests: string[];
-  review?: ReviewResult | null;
 }
 
-export interface ExecutionResponse {
-  task_id: string;
-  status: string;
-  current_step?: number | null;
-  next_step?: string | null;
-  interrupt_payload?: InterruptPayload | null;
-  final_result?: FinalResult | null;
-  error?: string | null;
+// ==================== Phase 2A Additions ====================
+
+export interface FileNode {
+  name: string;
+  path: string;
+  type: "file" | "directory";
+  size?: number;
+  children?: FileNode[];
 }
 
-export interface ActivityEvent {
+export interface WorkspaceResponse {
   id: string;
-  timestamp: string;
-  type: string;
-  title: string;
-  description?: string;
-  step?: number;
-  metadata?: Record<string, any>;
-  status?: "success" | "warning" | "error" | "info";
+  name: string;
+  root_path: string;
+  created_at: string;
+  updated_at: string;
 }
 
-export interface TestResultData {
-  success: boolean;
-  command?: string | string[];
-  exit_code?: number | null;
-  stdout?: string;
-  stderr?: string;
-  output?: string;
+export interface WorkspaceTreeResponse {
+  workspace_id: string;
+  root_path: string;
+  tree: FileNode[];
+  total_entries: number;
+}
+
+export interface SystemStatusResponse {
+  status: string;
+  version: string;
+  environment: string;
+}
+
+export interface LLMInfoResponse {
+  provider: string;
+  model: string;
+  display_name: string;
+  capabilities: {
+    supports_streaming?: boolean;
+    supports_structured_output?: boolean;
+    supports_tools?: boolean;
+    supports_system_messages?: boolean;
+    [key: string]: any;
+  };
+  primary_provider?: string;
+  models?: string[];
+  fallback_provider?: string | null;
 }

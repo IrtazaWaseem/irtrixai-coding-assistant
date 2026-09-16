@@ -1,4 +1,12 @@
-import { ApprovalRequest, ExecutionResponse, TaskResponse } from "../types";
+import {
+  ApprovalRequest,
+  ExecutionResponse,
+  LLMInfoResponse,
+  SystemStatusResponse,
+  TaskResponse,
+  WorkspaceResponse,
+  WorkspaceTreeResponse,
+} from "../types";
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL || "").replace(/\/$/, "");
 
@@ -28,6 +36,8 @@ async function handleResponse<T>(res: Response): Promise<T> {
   }
   return res.json() as Promise<T>;
 }
+
+// ==================== Task API ====================
 
 export async function createTask(
   workspacePath: string,
@@ -74,11 +84,12 @@ export async function submitApproval(
 
 export function subscribeToEvents(
   taskId: string,
-  onEvent: (eventType: string, data: any) => void,
+  onEvent: (eventType: string, data: any, eventId?: string) => void,
   onError: (err: Event) => void,
 ): () => void {
   const url = `${API_BASE}/api/v1/tasks/${taskId}/events`;
   const es = new EventSource(url);
+  let isClosed = false;
 
   const eventNames = [
     "task_started",
@@ -99,9 +110,11 @@ export function subscribeToEvents(
 
   eventNames.forEach((eventName) => {
     es.addEventListener(eventName, (e: MessageEvent) => {
+      if (isClosed) return;
       try {
         const parsed = JSON.parse(e.data);
-        onEvent(eventName, parsed);
+        const eventId = e.lastEventId || parsed?.id;
+        onEvent(eventName, parsed, eventId);
       } catch (err) {
         console.warn(
           `Failed to parse SSE payload for event ${eventName}:`,
@@ -112,10 +125,80 @@ export function subscribeToEvents(
   });
 
   es.onerror = (e) => {
-    onError(e);
+    if (!isClosed) {
+      onError(e);
+    }
   };
 
   return () => {
-    es.close();
+    if (!isClosed) {
+      isClosed = true;
+      es.close();
+    }
   };
+}
+
+// ==================== Workspace & System API ====================
+
+export async function getWorkspaces(): Promise<WorkspaceResponse[]> {
+  const res = await fetch(`${API_BASE}/api/v1/workspaces`, {
+    method: "GET",
+    headers: { Accept: "application/json" },
+  });
+  return handleResponse<WorkspaceResponse[]>(res);
+}
+
+export async function createWorkspace(
+  name: string,
+  rootPath: string,
+): Promise<WorkspaceResponse> {
+  const res = await fetch(`${API_BASE}/api/v1/workspaces`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      name: name.trim(),
+      root_path: rootPath.trim(),
+    }),
+  });
+  return handleResponse<WorkspaceResponse>(res);
+}
+
+export async function getWorkspace(
+  workspaceId: string,
+): Promise<WorkspaceResponse> {
+  const res = await fetch(`${API_BASE}/api/v1/workspaces/${workspaceId}`, {
+    method: "GET",
+    headers: { Accept: "application/json" },
+  });
+  return handleResponse<WorkspaceResponse>(res);
+}
+
+export async function getWorkspaceTree(
+  workspaceId: string,
+  maxDepth: number = 3,
+): Promise<WorkspaceTreeResponse> {
+  const res = await fetch(
+    `${API_BASE}/api/v1/workspaces/${workspaceId}/tree?max_depth=${maxDepth}`,
+    {
+      method: "GET",
+      headers: { Accept: "application/json" },
+    },
+  );
+  return handleResponse<WorkspaceTreeResponse>(res);
+}
+
+export async function getSystemStatus(): Promise<SystemStatusResponse> {
+  const res = await fetch(`${API_BASE}/api/v1/status`, {
+    method: "GET",
+    headers: { Accept: "application/json" },
+  });
+  return handleResponse<SystemStatusResponse>(res);
+}
+
+export async function getLLMInfo(): Promise<LLMInfoResponse> {
+  const res = await fetch(`${API_BASE}/api/v1/llm/info`, {
+    method: "GET",
+    headers: { Accept: "application/json" },
+  });
+  return handleResponse<LLMInfoResponse>(res);
 }
