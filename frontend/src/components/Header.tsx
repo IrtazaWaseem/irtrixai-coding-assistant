@@ -1,4 +1,12 @@
-import React from "react";
+import React, { useEffect, useState } from "react";
+import {
+  Activity,
+  AlertCircle,
+  CheckCircle2,
+  RotateCcw,
+  Terminal,
+} from "lucide-react";
+import { getSystemStatus } from "../services/api";
 
 interface HeaderProps {
   taskId: string | null;
@@ -13,74 +21,122 @@ export const Header: React.FC<HeaderProps> = ({
   connectionState,
   onReset,
 }) => {
+  const [backendHealthy, setBackendHealthy] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    let isMounted = true;
+    getSystemStatus()
+      .then((res) => {
+        if (isMounted) {
+          const s = res.status?.toLowerCase();
+          const isOk = s === "active" || s === "healthy" || s === "ok";
+          setBackendHealthy(isOk);
+        }
+      })
+      .catch(() => {
+        if (isMounted) setBackendHealthy(false);
+      });
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
   const getStatusBadge = () => {
-    const s = status.toLowerCase();
-    switch (s) {
+    switch (status.toLowerCase()) {
       case "running":
-        return "bg-sky-950 text-sky-400 border-sky-800";
+        return "bg-blue-950/80 text-blue-300 border-blue-800";
       case "awaiting_approval":
-        return "bg-amber-950 text-amber-400 border-amber-800 animate-pulse";
+        return "bg-amber-950/80 text-amber-300 border-amber-800 animate-pulse";
       case "completed":
-        return "bg-emerald-950 text-emerald-400 border-emerald-800";
+        return "bg-emerald-950/80 text-emerald-300 border-emerald-800";
       case "failed":
-      case "cancelled":
-        return "bg-rose-950 text-rose-400 border-rose-800";
+      case "aborted":
+        return "bg-rose-950/80 text-rose-300 border-rose-800";
       default:
-        return "bg-zinc-800 text-zinc-400 border-zinc-700";
+        return "bg-zinc-900 text-zinc-400 border-zinc-800";
     }
   };
 
   return (
-    <header className="border-b border-zinc-800 bg-zinc-900/60 backdrop-blur-sm sticky top-0 z-30 px-6 py-4 flex items-center justify-between">
-      <div className="flex items-center space-x-4">
-        <div className="flex items-center space-x-2">
-          <div className="w-8 h-8 rounded-lg bg-indigo-600 flex items-center justify-center font-bold text-white shadow-lg shadow-indigo-500/20">
-            IX
+    <header className="border-b border-zinc-800 bg-zinc-950/80 backdrop-blur-md px-6 py-3">
+      <div className="max-w-7xl mx-auto flex items-center justify-between">
+        <div className="flex items-center gap-4">
+          <div className="flex items-center gap-2.5">
+            <div className="w-8 h-8 rounded-lg bg-zinc-900 border border-zinc-700 flex items-center justify-center text-zinc-100 shadow-sm">
+              <Terminal className="w-4 h-4 text-emerald-400" />
+            </div>
+            <div>
+              <span className="font-bold tracking-tight text-sm text-zinc-100 font-mono">
+                IRTRIX<span className="text-emerald-400">AI</span>
+              </span>
+              <span className="hidden sm:inline-block text-[10px] text-zinc-500 font-mono ml-2 border border-zinc-800 rounded px-1.5 py-0.5">
+                AGENT WORKSPACE
+              </span>
+            </div>
           </div>
-          <h1 className="text-lg font-semibold tracking-tight text-zinc-100">
-            IrtrixAI{" "}
-            <span className="text-zinc-500 font-normal">Coding Assistant</span>
-          </h1>
+
+          <div className="hidden md:flex items-center gap-2 border-l border-zinc-800 pl-4">
+            {backendHealthy === null ? (
+              <span className="flex items-center gap-1.5 text-xs text-zinc-500 font-mono">
+                <span className="w-2 h-2 rounded-full bg-zinc-600 animate-pulse" />
+                Connecting...
+              </span>
+            ) : backendHealthy ? (
+              <span className="flex items-center gap-1.5 text-xs text-zinc-400 font-mono">
+                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                Backend healthy
+              </span>
+            ) : (
+              <span className="flex items-center gap-1.5 text-xs text-rose-400 font-mono">
+                <AlertCircle className="w-3.5 h-3.5 text-rose-400" />
+                Backend unreachable
+              </span>
+            )}
+          </div>
         </div>
 
-        {taskId && (
-          <div className="hidden sm:flex items-center space-x-2 text-xs font-mono bg-zinc-950 px-2.5 py-1 rounded border border-zinc-800 text-zinc-400">
-            <span className="text-zinc-600">ID:</span>
-            <span>{taskId.slice(0, 8)}...</span>
-          </div>
-        )}
-      </div>
-
-      <div className="flex items-center space-x-3">
-        {taskId && (
-          <>
-            <span
-              className={`text-xs px-2.5 py-1 rounded-full border font-medium uppercase tracking-wider ${getStatusBadge()}`}
+        <div className="flex items-center gap-3">
+          {taskId && (
+            <button
+              onClick={() => {
+                window.location.hash = "home";
+              }}
+              className={`flex items-center gap-2 px-2.5 py-1 rounded-full text-xs font-mono border transition-all ${getStatusBadge()}`}
+              title="Click to view task in Execution workspace"
             >
-              {status.replace("_", " ")}
-            </span>
+              <span className="capitalize font-semibold">
+                {status.replace("_", " ")}
+              </span>
+              <span className="opacity-50">·</span>
+              <span className="text-zinc-300">{taskId.slice(0, 8)}</span>
+            </button>
+          )}
 
-            <div className="hidden md:flex items-center space-x-1.5 text-xs text-zinc-500">
-              <span
-                className={`w-2 h-2 rounded-full ${
+          {connectionState !== "idle" && (
+            <div className="hidden sm:flex items-center gap-1.5 text-xs font-mono text-zinc-400">
+              <Activity
+                className={`w-3.5 h-3.5 ${
                   connectionState === "connected"
-                    ? "bg-emerald-500"
+                    ? "text-emerald-400"
                     : connectionState === "reconnecting"
-                      ? "bg-amber-500 animate-ping"
-                      : "bg-zinc-600"
+                      ? "text-amber-400 animate-spin"
+                      : "text-zinc-600"
                 }`}
               />
               <span className="capitalize">{connectionState}</span>
             </div>
+          )}
 
+          {taskId && (
             <button
               onClick={onReset}
-              className="text-xs px-3 py-1.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 transition-colors border border-zinc-700"
+              className="flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-medium text-zinc-400 hover:text-zinc-100 hover:bg-zinc-900 border border-zinc-800 transition-colors"
             >
-              New Task
+              <RotateCcw className="w-3 h-3" />
+              <span>New Task</span>
             </button>
-          </>
-        )}
+          )}
+        </div>
       </div>
     </header>
   );
