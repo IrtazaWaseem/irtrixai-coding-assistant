@@ -44,25 +44,65 @@ export const HomePage: React.FC = () => {
   const hasEvent = (type: string) => events.some((e) => e.type === type);
   const repairCount = events.filter((e) => e.type === "repair_started").length;
 
+  // Derive a single mutually exclusive active step
+  let activeStepId: string | null = null;
+  if (status === "awaiting_approval") {
+    activeStepId = "approve";
+  } else if (status === "running") {
+    for (let i = events.length - 1; i >= 0; i--) {
+      const type = events[i].type;
+      if (type === "review_started" || type === "test_passed") {
+        activeStepId = "review";
+        break;
+      }
+      if (type === "repair_started" || type === "test_failed") {
+        activeStepId = "repair";
+        break;
+      }
+      if (type === "test_started" || type === "patch_applied") {
+        activeStepId = "test";
+        break;
+      }
+      if (type === "coding") {
+        activeStepId = "code";
+        break;
+      }
+      if (type === "planning" || type === "workspace_inspected") {
+        activeStepId = "plan";
+        break;
+      }
+      if (type === "task_started") {
+        activeStepId = "inspect";
+        break;
+      }
+    }
+    if (!activeStepId) activeStepId = "inspect";
+  }
+
+  const isSuccessful = status === "completed";
+  const isFailed = status === "failed" || status === "aborted";
+
   const PIPELINE_STEPS = [
     {
       id: "inspect",
       label: "Inspect",
       icon: Search,
-      isDone: hasEvent("workspace_inspected") || hasEvent("planning"),
-      isActive: status === "running" && !hasEvent("workspace_inspected"),
+      isDone:
+        hasEvent("workspace_inspected") ||
+        hasEvent("planning") ||
+        hasEvent("coding") ||
+        isSuccessful,
+      isActive: activeStepId === "inspect",
     },
     {
       id: "plan",
       label: "Plan",
       icon: FileText,
       isDone:
-        hasEvent("planning") &&
-        (hasEvent("coding") || hasEvent("approval_required")),
-      isActive:
-        status === "running" &&
-        hasEvent("workspace_inspected") &&
-        !hasEvent("planning"),
+        (hasEvent("planning") || hasEvent("coding")) &&
+        activeStepId !== "plan" &&
+        activeStepId !== "inspect",
+      isActive: activeStepId === "plan",
     },
     {
       id: "code",
@@ -70,29 +110,29 @@ export const HomePage: React.FC = () => {
       icon: Code2,
       isDone:
         (hasEvent("coding") || hasEvent("patch_applied")) &&
-        status !== "running",
-      isActive:
-        status === "running" &&
-        hasEvent("planning") &&
-        !hasEvent("approval_required"),
+        activeStepId !== "code" &&
+        activeStepId !== "plan" &&
+        activeStepId !== "inspect",
+      isActive: activeStepId === "code",
     },
     {
       id: "approve",
       label: "Approve",
       icon: FileCheck,
-      isDone: hasEvent("patch_applied") || hasEvent("approval_submitted"),
-      isActive: status === "awaiting_approval",
+      isDone:
+        hasEvent("patch_applied") ||
+        (!hasEvent("approval_required") &&
+          (hasEvent("test_started") || isSuccessful)),
+      isActive: activeStepId === "approve",
     },
     {
       id: "test",
       label: "Test",
       icon: TestTube2,
-      isDone: hasEvent("test_passed") || hasEvent("test_failed"),
-      isActive:
-        status === "running" &&
-        hasEvent("patch_applied") &&
-        !hasEvent("test_passed") &&
-        !hasEvent("test_failed"),
+      isDone: hasEvent("test_passed"),
+      isActive: activeStepId === "test",
+      isFailed:
+        isFailed && (hasEvent("test_failed") || activeStepId === "test"),
     },
     ...(repairCount > 0
       ? [
@@ -100,8 +140,9 @@ export const HomePage: React.FC = () => {
             id: "repair",
             label: `Repair (${repairCount})`,
             icon: Wrench,
-            isDone: hasEvent("test_passed") && repairCount > 0,
-            isActive: status === "running" && hasEvent("repair_started"),
+            isDone: hasEvent("test_passed") && activeStepId !== "repair",
+            isActive: activeStepId === "repair",
+            isFailed: isFailed && activeStepId === "repair",
           },
         ]
       : []),
@@ -109,16 +150,16 @@ export const HomePage: React.FC = () => {
       id: "review",
       label: "Review",
       icon: ShieldAlert,
-      isDone: hasEvent("review_started") && status === "completed",
-      isActive: status === "running" && hasEvent("review_started"),
+      isDone: hasEvent("review_started") && isSuccessful,
+      isActive: activeStepId === "review",
     },
     {
       id: "finalize",
       label: "Finalize",
       icon: CheckCircle2,
-      isDone: status === "completed",
+      isDone: isSuccessful,
       isActive: false,
-      isFailed: status === "failed" || status === "aborted",
+      isFailed: isFailed,
     },
   ];
 
@@ -199,7 +240,7 @@ export const HomePage: React.FC = () => {
         </div>
       </div>
 
-      {/* RIGHT PANE: Execution Surface */}
+      {/* RIGHT PANE: Focused Execution Workspace */}
       <div className="lg:col-span-8 space-y-4 flex flex-col">
         {!taskId ? (
           <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-6 space-y-4">

@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
+from typing import Any
 
 from pydantic import BaseModel
 
@@ -36,17 +37,21 @@ class LLMProvider(ABC):
 
     @property
     @abstractmethod
-    def capabilities(self) -> ProviderCapabilities:
+    def capabilities(self) -> ProviderCapabilities | dict[str, Any]:
         """Returns the capabilities supported by this provider and model."""
         ...
 
     def get_model_info(self) -> ModelInfo:
         """Returns provider and model metadata without exposing credentials."""
+        caps = self.capabilities
+        if isinstance(caps, dict):
+            caps = ProviderCapabilities(**caps)
+
         return ModelInfo(
             provider=self.provider_name,
             model=self.model,
             display_name=format_display_name(self.provider_name, self.model),
-            capabilities=self.capabilities,
+            capabilities=caps,
         )
 
     @abstractmethod

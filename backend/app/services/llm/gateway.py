@@ -1,5 +1,6 @@
 import logging
 from collections.abc import AsyncIterator
+from typing import Any
 
 from pydantic import BaseModel
 
@@ -16,6 +17,18 @@ from app.services.llm.base import LLMProvider
 from app.services.llm.factory import LLMFactory
 
 logger = logging.getLogger(__name__)
+
+
+def _has_capability(provider: LLMProvider | None, capability: str) -> bool:
+    """Safely extracts a capability boolean whether provider.capabilities is an object or dict."""
+    if provider is None:
+        return False
+    caps = getattr(provider, "capabilities", None)
+    if caps is None:
+        return False
+    if isinstance(caps, dict):
+        return bool(caps.get(capability, False))
+    return bool(getattr(caps, capability, False))
 
 
 class LLMGateway:
@@ -53,8 +66,7 @@ class LLMGateway:
         return self.primary.get_model_info()
 
     def check_capability(self, capability: str) -> bool:
-        caps = self.primary.capabilities
-        return getattr(caps, capability, False)
+        return _has_capability(self.primary, capability)
 
     async def generate(
         self,
@@ -119,7 +131,7 @@ class LLMGateway:
         system_instruction: str | None = None,
         temperature: float | None = None,
     ) -> T:
-        if not self.primary.capabilities.supports_structured_output:
+        if not _has_capability(self.primary, "supports_structured_output"):
             raise LLMUnsupportedCapabilityException(
                 f"Provider '{self.primary.provider_name}' with model '{self.primary.model}' "
                 "does not support structured output."
@@ -146,9 +158,8 @@ class LLMGateway:
             LLMConnectionException,
             LLMRateLimitException,
         ) as exc:
-            if (
-                self.fallback is not None
-                and self.fallback.capabilities.supports_structured_output
+            if self.fallback is not None and _has_capability(
+                self.fallback, "supports_structured_output"
             ):
                 logger.warning(
                     "Primary provider '%s' failed (%s); triggering fallback structured provider '%s'",
@@ -176,7 +187,7 @@ class LLMGateway:
         max_output_tokens: int | None = None,
     ) -> AsyncIterator[LLMStreamChunk]:
         """Dispatches streaming request with capability validation and restart-signaled fallback."""
-        if not self.primary.capabilities.supports_streaming:
+        if not _has_capability(self.primary, "supports_streaming"):
             raise LLMUnsupportedCapabilityException(
                 f"Provider '{self.primary.provider_name}' with model '{self.primary.model}' "
                 "does not support streaming."
@@ -200,10 +211,7 @@ class LLMGateway:
             LLMConnectionException,
             LLMRateLimitException,
         ) as exc:
-            if (
-                self.fallback is not None
-                and self.fallback.capabilities.supports_streaming
-            ):
+            if self.fallback is not None and _has_capability(self.fallback, "supports_streaming"):
                 logger.warning(
                     "Primary provider '%s' stream failed (%s); triggering fallback stream '%s' (yielded_any=%s)",
                     self.primary.provider_name,

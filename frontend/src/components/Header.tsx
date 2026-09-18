@@ -25,19 +25,27 @@ export const Header: React.FC<HeaderProps> = ({
 
   useEffect(() => {
     let isMounted = true;
-    getSystemStatus()
-      .then((res) => {
-        if (isMounted) {
-          const s = res.status?.toLowerCase();
-          const isOk = s === "active" || s === "healthy" || s === "ok";
-          setBackendHealthy(isOk);
-        }
-      })
-      .catch(() => {
-        if (isMounted) setBackendHealthy(false);
-      });
+
+    const checkHealth = () => {
+      getSystemStatus()
+        .then((res) => {
+          if (isMounted) {
+            const s = res.status?.toLowerCase();
+            const isOk = s === "active" || s === "healthy" || s === "ok";
+            setBackendHealthy(isOk);
+          }
+        })
+        .catch(() => {
+          if (isMounted) setBackendHealthy(false);
+        });
+    };
+
+    checkHealth();
+    const intervalId = window.setInterval(checkHealth, 20000);
+
     return () => {
       isMounted = false;
+      window.clearInterval(intervalId);
     };
   }, []);
 
@@ -60,6 +68,7 @@ export const Header: React.FC<HeaderProps> = ({
   return (
     <header className="border-b border-zinc-800 bg-zinc-950/80 backdrop-blur-md px-6 py-3">
       <div className="max-w-7xl mx-auto flex items-center justify-between">
+        {/* Brand & Telemetry */}
         <div className="flex items-center gap-4">
           <div className="flex items-center gap-2.5">
             <div className="w-8 h-8 rounded-lg bg-zinc-900 border border-zinc-700 flex items-center justify-center text-zinc-100 shadow-sm">
@@ -75,6 +84,7 @@ export const Header: React.FC<HeaderProps> = ({
             </div>
           </div>
 
+          {/* Persistent Backend Health */}
           <div className="hidden md:flex items-center gap-2 border-l border-zinc-800 pl-4">
             {backendHealthy === null ? (
               <span className="flex items-center gap-1.5 text-xs text-zinc-500 font-mono">
@@ -95,6 +105,7 @@ export const Header: React.FC<HeaderProps> = ({
           </div>
         </div>
 
+        {/* Task Meta & Controls */}
         <div className="flex items-center gap-3">
           {taskId && (
             <button

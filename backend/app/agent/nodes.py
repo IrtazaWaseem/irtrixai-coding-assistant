@@ -56,6 +56,15 @@ _llm_gateway: LLMGateway | None = None
 _execution_service: ExecutionService | None = None
 
 
+def _get_val(obj: Any, key: str, default: Any = None) -> Any:
+    """Safely extracts value from either a dictionary or an object attribute."""
+    if obj is None:
+        return default
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
 def sanitize_error_message(err: Exception | str) -> str:
     """Sanitizes exception strings to ensure credentials and keys never leak into graph state."""
     sanitized = str(err)
@@ -107,10 +116,7 @@ def _resolve_execution_service(
 ) -> ExecutionService:
     if config and isinstance(config, dict):
         configurable = config.get("configurable", {})
-        if (
-            "execution_service" in configurable
-            and configurable["execution_service"] is not None
-        ):
+        if "execution_service" in configurable and configurable["execution_service"] is not None:
             return configurable["execution_service"]
     return get_execution_service()
 
@@ -181,15 +187,9 @@ def extract_file_paths(tool_res: Any) -> list[str]:
         elif isinstance(out, str):
             raw_list = [line.strip() for line in out.splitlines() if line.strip()]
 
-    if (
-        not raw_list
-        and hasattr(tool_res, "metadata")
-        and isinstance(tool_res.metadata, dict)
-    ):
+    if not raw_list and hasattr(tool_res, "metadata") and isinstance(tool_res.metadata, dict):
         for key in ("files", "entries", "items", "paths"):
-            if key in tool_res.metadata and isinstance(
-                tool_res.metadata[key], (list, tuple)
-            ):
+            if key in tool_res.metadata and isinstance(tool_res.metadata[key], (list, tuple)):
                 raw_list = list(tool_res.metadata[key])
                 break
 
@@ -237,11 +237,9 @@ def split_unified_diff(patch_text: str) -> list[tuple[str, str]]:
     i = 0
     while i < len(lines):
         line = lines[i]
-        is_header = False
         target = ""
 
         if line.startswith("diff --git "):
-            is_header = True
             old_line, new_line = "", ""
             for k in range(1, min(5, len(lines) - i)):
                 nxt = lines[i + k]
@@ -252,16 +250,13 @@ def split_unified_diff(patch_text: str) -> list[tuple[str, str]]:
                     break
             target = _extract_target_from_header(old_line, new_line)
         elif line.startswith("--- "):
-            is_header = True
             old_line = line
             new_line = (
-                lines[i + 1]
-                if i + 1 < len(lines) and lines[i + 1].startswith("+++ ")
-                else ""
+                lines[i + 1] if i + 1 < len(lines) and lines[i + 1].startswith("+++ ") else ""
             )
             target = _extract_target_from_header(old_line, new_line)
 
-        if is_header and target:
+        if target:
             file_indices.append(i)
             file_targets.append(target)
             i += 1
@@ -348,19 +343,13 @@ async def inspect_workspace(state: AgentState) -> dict[str, Any]:
 
     if files:
         file_sample = files[:60]
-        summary_blocks.append(
-            "Files in Workspace:\n" + "\n".join(f"- {f}" for f in file_sample)
-        )
+        summary_blocks.append("Files in Workspace:\n" + "\n".join(f"- {f}" for f in file_sample))
         if len(files) > 60:
             summary_blocks.append(f"... and {len(files) - 60} more files.")
     else:
         summary_blocks.append("Files in Workspace: (empty workspace)")
 
-    ws_path_obj = (
-        resolved_ws
-        if resolved_ws
-        else (Path(workspace_path) if workspace_path else None)
-    )
+    ws_path_obj = resolved_ws if resolved_ws else (Path(workspace_path) if workspace_path else None)
     if ws_path_obj and (ws_path_obj / ".git").is_dir():
         try:
             status_res = git_status(workspace_root=resolved_ws)
@@ -377,36 +366,26 @@ async def inspect_workspace(state: AgentState) -> dict[str, Any]:
             logger.debug("Git status check skipped: %s", git_err)
 
     manifest_candidates = [
-        f
-        for f in files
-        if Path(f).name.lower() in ("readme.md", "pyproject.toml", "package.json")
+        f for f in files if Path(f).name.lower() in ("readme.md", "pyproject.toml", "package.json")
     ]
     if manifest_candidates:
         primary_manifest = manifest_candidates[0]
         try:
-            read_res = read_file(
-                primary_manifest, limit_lines=20, workspace_root=resolved_ws
-            )
+            read_res = read_file(primary_manifest, limit_lines=20, workspace_root=resolved_ws)
             if read_res.success and read_res.output is not None:
                 if isinstance(read_res.output, str):
                     manifest_text = read_res.output.strip()
                 elif isinstance(read_res.output, dict):
-                    manifest_text = str(
-                        read_res.output.get("content", read_res.output)
-                    ).strip()
+                    manifest_text = str(read_res.output.get("content", read_res.output)).strip()
                 else:
                     manifest_text = str(read_res.output).strip()
-                summary_blocks.append(
-                    f"Manifest Excerpt ({primary_manifest}):\n{manifest_text}"
-                )
+                summary_blocks.append(f"Manifest Excerpt ({primary_manifest}):\n{manifest_text}")
         except Exception as read_err:
             logger.debug("Manifest read skipped: %s", read_err)
 
     raw_summary = "\n\n".join(summary_blocks)
     trunc_res = truncate_output(raw_summary, max_bytes=settings.MAX_TOOL_OUTPUT_BYTES)
-    bounded_summary = (
-        trunc_res[0] if isinstance(trunc_res, (tuple, list)) else trunc_res
-    )
+    bounded_summary = trunc_res[0] if isinstance(trunc_res, (tuple, list)) else trunc_res
 
     return {
         "workspace_summary": bounded_summary,
@@ -441,9 +420,7 @@ async def repository_context(
         }
     except Exception as err:
         clean_err = sanitize_error_message(err)
-        logger.error(
-            "Node [repository_context] context extraction failed: %s", clean_err
-        )
+        logger.error("Node [repository_context] context extraction failed: %s", clean_err)
         fallback_ctx = RepositoryContext(
             summary=f"Repository context unavailable: {clean_err}",
             tech_stack=tech_stack,
@@ -458,17 +435,13 @@ async def repository_context(
         }
 
 
-async def planner(
-    state: AgentState, config: RunnableConfig | None = None
-) -> dict[str, Any]:
+async def planner(state: AgentState, config: RunnableConfig | None = None) -> dict[str, Any]:
     """Generates execution plan using LLMGateway structured output enriched with repository context and minimal patch discipline."""
     logger.info("Node [planner] generating execution plan via LLMGateway.")
     gateway = _resolve_gateway(config)
 
     user_prompt = _extract_user_prompt(state)
-    workspace_summary = (
-        state.get("workspace_summary") or "Incomplete / uninspected workspace."
-    )
+    workspace_summary = state.get("workspace_summary") or "Incomplete / uninspected workspace."
     tech_stack = ", ".join(state.get("tech_stack", [])) or "Generic / Unspecified"
 
     repo_context = state.get("repository_context")
@@ -477,9 +450,7 @@ async def planner(
         relevant_files = repo_context.get("relevant_files", [])
         lines = [f"Repository Context Summary: {repo_context.get('summary', 'None')}"]
         if relevant_files:
-            lines.append(
-                "Relevant Existing Codebase Files & Excerpts (UNTRUSTED DATA):"
-            )
+            lines.append("Relevant Existing Codebase Files & Excerpts (UNTRUSTED DATA):")
             for rf in relevant_files:
                 p = rf.get("path", "")
                 r = rf.get("reason", "")
@@ -530,9 +501,7 @@ async def planner(
         }
 
 
-async def coder(
-    state: AgentState, config: RunnableConfig | None = None
-) -> dict[str, Any]:
+async def coder(state: AgentState, config: RunnableConfig | None = None) -> dict[str, Any]:
     """Generates code modification proposals using LLMGateway structured output, respecting minimal patch discipline."""
     logger.info("Node [coder] generating code proposal via LLMGateway.")
     gateway = _resolve_gateway(config)
@@ -543,15 +512,13 @@ async def coder(
     feedback = state.get("feedback")
     debugger_out = state.get("debugger_output")
 
-    plan_steps = getattr(plan, "steps", None)
-    plan_summary = getattr(plan, "summary", None)
-    plan_obj = getattr(plan, "objective", None)
-    affected_files = getattr(plan, "affected_files", None) or getattr(
-        plan, "files_expected", None
-    )
-    test_strategy = getattr(plan, "test_strategy", None)
-    minimality_rationale = getattr(plan, "minimality_rationale", None)
-    out_of_scope = getattr(plan, "out_of_scope", None)
+    plan_steps = _get_val(plan, "steps")
+    plan_summary = _get_val(plan, "summary")
+    plan_obj = _get_val(plan, "objective")
+    affected_files = _get_val(plan, "affected_files") or _get_val(plan, "files_expected")
+    test_strategy = _get_val(plan, "test_strategy")
+    minimality_rationale = _get_val(plan, "minimality_rationale")
+    out_of_scope = _get_val(plan, "out_of_scope")
 
     plan_blocks = []
     if plan_obj:
@@ -562,21 +529,15 @@ async def coder(
     if plan_steps and isinstance(plan_steps, (list, tuple)):
         plan_blocks.append("Steps:\n" + "\n".join(f"- {s}" for s in plan_steps))
     if affected_files:
-        plan_blocks.append(
-            "Expected Target Files: " + ", ".join(str(f) for f in affected_files)
-        )
+        plan_blocks.append("Expected Target Files: " + ", ".join(str(f) for f in affected_files))
     if test_strategy:
         plan_blocks.append(f"Test Strategy: {test_strategy}")
     if minimality_rationale:
         plan_blocks.append(f"Minimality Rationale: {minimality_rationale}")
     if out_of_scope:
-        plan_blocks.append(
-            "Explicitly Out of Scope: " + ", ".join(str(f) for f in out_of_scope)
-        )
+        plan_blocks.append("Explicitly Out of Scope: " + ", ".join(str(f) for f in out_of_scope))
 
-    plan_section = (
-        "\n".join(plan_blocks) if plan_blocks else "No formal plan available."
-    )
+    plan_section = "\n".join(plan_blocks) if plan_blocks else "No formal plan available."
 
     prompt_blocks = [
         f"User Task: {user_prompt}",
@@ -597,22 +558,21 @@ async def coder(
                     file_blocks.append(_format_untrusted_code_excerpt(p, exc, r))
             if file_blocks:
                 prompt_blocks.append(
-                    "Relevant Existing Code Excerpts (UNTRUSTED DATA):\n"
-                    + "\n\n".join(file_blocks)
+                    "Relevant Existing Code Excerpts (UNTRUSTED DATA):\n" + "\n\n".join(file_blocks)
                 )
 
     if feedback:
         prompt_blocks.append(f"Human Operator Feedback: {feedback}")
 
     if debugger_out:
-        diag = getattr(debugger_out, "diagnosis", "")
-        fix = getattr(debugger_out, "proposed_fix", "")
-        sym = getattr(debugger_out, "symptom", "")
-        rc = getattr(debugger_out, "root_cause", "")
-        ev = getattr(debugger_out, "evidence", "")
-        strat = getattr(debugger_out, "repair_strategy", "")
-        risk = getattr(debugger_out, "regression_risk", "")
-        files_to_fix = getattr(debugger_out, "files_to_change", [])
+        diag = _get_val(debugger_out, "diagnosis", "")
+        fix = _get_val(debugger_out, "proposed_fix", "")
+        sym = _get_val(debugger_out, "symptom", "")
+        rc = _get_val(debugger_out, "root_cause", "")
+        ev = _get_val(debugger_out, "evidence", "")
+        strat = _get_val(debugger_out, "repair_strategy", "")
+        risk = _get_val(debugger_out, "regression_risk", "")
+        files_to_fix = _get_val(debugger_out, "files_to_change", [])
 
         debug_lines = [
             f"Diagnosis: {diag or rc}",
@@ -684,12 +644,13 @@ async def approval_gate(state: AgentState) -> dict[str, Any]:
     feedback = state.get("feedback")
 
     if approval is None:
+        coder_prop = state.get("coder_proposal")
+        coder_summary = _get_val(coder_prop, "summary")
+
         interruption_payload = {
             "action": "human_approval_required",
             "pending_patch": state.get("pending_patch"),
-            "coder_summary": (
-                state["coder_proposal"].summary if state.get("coder_proposal") else None
-            ),
+            "coder_summary": coder_summary,
         }
         res = interrupt(interruption_payload)
 
@@ -708,9 +669,7 @@ async def approval_gate(state: AgentState) -> dict[str, Any]:
     }
 
 
-async def test_runner(
-    state: AgentState, config: RunnableConfig | None = None
-) -> dict[str, Any]:
+async def test_runner(state: AgentState, config: RunnableConfig | None = None) -> dict[str, Any]:
     logger.info("Node [test_runner] executing test verification.")
     existing_result = state.get("test_result")
     workspace_path = state.get("workspace_path", "")
@@ -725,12 +684,9 @@ async def test_runner(
         return {"test_result": existing_result, "current_step": 5}
 
     ws_obj = Path(workspace_path)
-    configurable = (
-        config.get("configurable", {}) if config and isinstance(config, dict) else {}
-    )
+    configurable = config.get("configurable", {}) if config and isinstance(config, dict) else {}
     has_custom_service = (
-        configurable.get("execution_service") is not None
-        or _execution_service is not None
+        configurable.get("execution_service") is not None or _execution_service is not None
     )
 
     if not ws_obj.is_dir() and not has_custom_service:
@@ -780,9 +736,7 @@ async def test_runner(
             exit_code = metadata.get("exit_code")
 
         stdout = (
-            raw_res.get("stdout")
-            if isinstance(raw_res, dict)
-            else getattr(raw_res, "stdout", None)
+            raw_res.get("stdout") if isinstance(raw_res, dict) else getattr(raw_res, "stdout", None)
         )
         if stdout is None:
             stdout = metadata.get("stdout") or (
@@ -793,56 +747,38 @@ async def test_runner(
         stdout = stdout or ""
 
         stderr = (
-            raw_res.get("stderr")
-            if isinstance(raw_res, dict)
-            else getattr(raw_res, "stderr", None)
+            raw_res.get("stderr") if isinstance(raw_res, dict) else getattr(raw_res, "stderr", None)
         )
         if stderr is None:
             stderr = metadata.get("stderr") or (
-                raw_res.get("error")
-                if isinstance(raw_res, dict)
-                else getattr(raw_res, "error", "")
+                raw_res.get("error") if isinstance(raw_res, dict) else getattr(raw_res, "error", "")
             )
         stderr = stderr or ""
 
         if isinstance(raw_res, dict) and "success" in raw_res:
             success = bool(raw_res["success"])
-        elif hasattr(raw_res, "success") and isinstance(
-            raw_res.success, bool
-        ):
+        elif hasattr(raw_res, "success") and isinstance(raw_res.success, bool):
             success = bool(raw_res.success)
         elif exit_code is not None:
             success = exit_code == 0
         else:
             success = False
 
-        trunc_stdout = truncate_output(
-            str(stdout), max_bytes=settings.MAX_TOOL_OUTPUT_BYTES
-        )
+        trunc_stdout = truncate_output(str(stdout), max_bytes=settings.MAX_TOOL_OUTPUT_BYTES)
         bounded_stdout = (
-            trunc_stdout[0]
-            if isinstance(trunc_stdout, (tuple, list))
-            else str(trunc_stdout)
+            trunc_stdout[0] if isinstance(trunc_stdout, (tuple, list)) else str(trunc_stdout)
         )
 
-        trunc_stderr = truncate_output(
-            str(stderr), max_bytes=settings.MAX_TOOL_OUTPUT_BYTES
-        )
+        trunc_stderr = truncate_output(str(stderr), max_bytes=settings.MAX_TOOL_OUTPUT_BYTES)
         bounded_stderr = (
-            trunc_stderr[0]
-            if isinstance(trunc_stderr, (tuple, list))
-            else str(trunc_stderr)
+            trunc_stderr[0] if isinstance(trunc_stderr, (tuple, list)) else str(trunc_stderr)
         )
 
         combined = (
-            f"{bounded_stdout}\n{bounded_stderr}".strip()
-            if bounded_stderr
-            else bounded_stdout
+            f"{bounded_stdout}\n{bounded_stderr}".strip() if bounded_stderr else bounded_stdout
         )
         trunc_comb = truncate_output(combined, max_bytes=settings.MAX_TOOL_OUTPUT_BYTES)
-        bounded_output = (
-            trunc_comb[0] if isinstance(trunc_comb, (tuple, list)) else str(trunc_comb)
-        )
+        bounded_output = trunc_comb[0] if isinstance(trunc_comb, (tuple, list)) else str(trunc_comb)
 
         test_result = {
             "success": success,
@@ -855,9 +791,7 @@ async def test_runner(
         }
     except Exception as err:
         clean_err = sanitize_error_message(err)
-        logger.error(
-            "Node [test_runner] ExecutionService failed with error: %s", clean_err
-        )
+        logger.error("Node [test_runner] ExecutionService failed with error: %s", clean_err)
         test_result = {
             "success": False,
             "exit_code": None,
@@ -890,9 +824,7 @@ async def test_runner(
 test_runner.__test__ = False
 
 
-async def debugger(
-    state: AgentState, config: RunnableConfig | None = None
-) -> dict[str, Any]:
+async def debugger(state: AgentState, config: RunnableConfig | None = None) -> dict[str, Any]:
     test_res = state.get("test_result")
     if not isinstance(test_res, dict) or test_res.get("success") is not False:
         logger.error("Node [debugger] invoked without genuine failed test result.")
@@ -914,13 +846,7 @@ async def debugger(
 
     test_output = str(test_res.get("output") or "Unknown failure output")
     coder_prop = state.get("coder_proposal")
-    prior_patch = (
-        coder_prop.patch
-        if coder_prop and hasattr(coder_prop, "patch")
-        else (
-            coder_prop.get("patch", "None") if isinstance(coder_prop, dict) else "None"
-        )
-    )
+    prior_patch = _get_val(coder_prop, "patch", "None")
 
     prompt = (
         f"Test Command: {state.get('test_command') or 'pytest'}\n"
@@ -959,9 +885,7 @@ async def debugger(
         }
 
 
-async def reviewer(
-    state: AgentState, config: RunnableConfig | None = None
-) -> dict[str, Any]:
+async def reviewer(state: AgentState, config: RunnableConfig | None = None) -> dict[str, Any]:
     logger.info("Node [reviewer] auditing implementation via LLMGateway.")
     gateway = _resolve_gateway(config)
 
@@ -974,22 +898,9 @@ async def reviewer(
     )
 
     coder_prop = state.get("coder_proposal")
-    patch_text = (
-        coder_prop.patch
-        if coder_prop and hasattr(coder_prop, "patch")
-        else (
-            coder_prop.get("patch", "No patch proposed")
-            if isinstance(coder_prop, dict)
-            else "No patch proposed"
-        )
-    )
-    files_touched = (
-        ", ".join(coder_prop.files_changed)
-        if coder_prop
-        and hasattr(coder_prop, "files_changed")
-        and coder_prop.files_changed
-        else "None"
-    )
+    patch_text = _get_val(coder_prop, "patch", "No patch proposed")
+    files_changed_val = _get_val(coder_prop, "files_changed", [])
+    files_touched = ", ".join(files_changed_val) if files_changed_val else "None"
 
     prompt = (
         f"Authoritative Test Status: {'PASSED' if test_passed else 'FAILED / UNVERIFIED'}\n"
@@ -1018,8 +929,7 @@ async def reviewer(
                 ),
                 issues=list(review.issues) + ["Authoritative tests did not pass."],
                 security_concerns=list(review.security_concerns),
-                required_changes=list(review.required_changes)
-                + ["Ensure all test suites pass."],
+                required_changes=list(review.required_changes) + ["Ensure all test suites pass."],
             )
 
         return {
@@ -1045,11 +955,12 @@ async def finalize(state: AgentState) -> dict[str, Any]:
     error = state.get("error")
     review = state.get("review_summary")
 
+    review_verdict = _get_val(review, "verdict")
+    review_summary_text = _get_val(review, "summary", "")
+
     if approval is False:
         status = "aborted"
-        summary = (
-            f"Workflow aborted by human operator: {state.get('feedback', 'Rejected')}"
-        )
+        summary = f"Workflow aborted by human operator: {state.get('feedback', 'Rejected')}"
     elif error is not None:
         status = "failed"
         summary = f"Workflow halted due to error: {error}"
@@ -1058,20 +969,22 @@ async def finalize(state: AgentState) -> dict[str, Any]:
         if test_res is None:
             summary = "Task failed: authoritative test verification was never executed."
         else:
-            summary = f"Task failed: tests did not pass (repair count: {state.get('repair_count', 0)})."
+            summary = (
+                f"Task failed: tests did not pass (repair count: {state.get('repair_count', 0)})."
+            )
     elif is_stub:
         status = "failed"
         summary = "Task failed: test verification was only a placeholder/stub."
     elif review is None:
         status = "failed"
         summary = "Task failed: code review was not completed."
-    elif review.verdict == "rejected":
+    elif review_verdict == "rejected":
         status = "failed"
-        summary = f"Task failed: reviewer rejected implementation: {review.summary}"
-    elif review.verdict == "changes_requested":
+        summary = f"Task failed: reviewer rejected implementation: {review_summary_text}"
+    elif review_verdict == "changes_requested":
         status = "failed"
-        summary = f"Task failed: reviewer requested changes: {review.summary}"
-    elif review.verdict == "approved" and approval is True:
+        summary = f"Task failed: reviewer requested changes: {review_summary_text}"
+    elif review_verdict == "approved" and approval is True:
         status = "completed"
         summary = "Task completed successfully and all tests verified"
     else:
@@ -1085,10 +998,9 @@ async def finalize(state: AgentState) -> dict[str, Any]:
     actual_files_changed: list[str] = []
     if state.get("applied_diff") and state.get("coder_proposal"):
         coder_prop = state["coder_proposal"]
-        if hasattr(coder_prop, "files_changed"):
-            actual_files_changed = list(coder_prop.files_changed)
-        elif isinstance(coder_prop, dict) and "files_changed" in coder_prop:
-            actual_files_changed = list(coder_prop["files_changed"])
+        files_val = _get_val(coder_prop, "files_changed", [])
+        if files_val:
+            actual_files_changed = list(files_val)
 
     final = FinalizationResult(
         status=status,
@@ -1135,18 +1047,9 @@ async def apply_approved_patch(state: AgentState) -> dict[str, Any]:
     chunks = split_unified_diff(pending_patch)
     if not chunks:
         coder_prop = state.get("coder_proposal")
-        if (
-            coder_prop
-            and hasattr(coder_prop, "files_changed")
-            and coder_prop.files_changed
-        ):
-            chunks = [(f, pending_patch) for f in coder_prop.files_changed]
-        elif (
-            coder_prop
-            and isinstance(coder_prop, dict)
-            and coder_prop.get("files_changed")
-        ):
-            chunks = [(f, pending_patch) for f in coder_prop["files_changed"]]
+        files_changed = _get_val(coder_prop, "files_changed", [])
+        if files_changed:
+            chunks = [(f, pending_patch) for f in files_changed]
         else:
             first_target = extract_patch_target_file(pending_patch)
             if first_target:
@@ -1161,9 +1064,7 @@ async def apply_approved_patch(state: AgentState) -> dict[str, Any]:
                 "output": None,
                 "metadata": {},
             },
-            "error": (
-                "Patch application failed: unable to determine target file(s) from patch."
-            ),
+            "error": ("Patch application failed: unable to determine target file(s) from patch."),
             "current_step": 4,
         }
 
@@ -1179,23 +1080,16 @@ async def apply_approved_patch(state: AgentState) -> dict[str, Any]:
                     "output": None,
                     "metadata": {"duplicate_target": target},
                 },
-                "error": (
-                    f"Patch application failed: duplicate target file '{target}' in patch."
-                ),
+                "error": (f"Patch application failed: duplicate target file '{target}' in patch."),
                 "current_step": 4,
             }
         seen_targets.add(norm_target)
 
     coder_prop = state.get("coder_proposal")
     all_targets_to_validate: set[str] = {target for target, _ in chunks}
-    if coder_prop and hasattr(coder_prop, "files_changed") and coder_prop.files_changed:
-        for f in coder_prop.files_changed:
-            all_targets_to_validate.add(f)
-    elif (
-        coder_prop and isinstance(coder_prop, dict) and coder_prop.get("files_changed")
-    ):
-        for f in coder_prop["files_changed"]:
-            all_targets_to_validate.add(f)
+    files_changed_list = _get_val(coder_prop, "files_changed", [])
+    for f in files_changed_list:
+        all_targets_to_validate.add(f)
 
     for target in all_targets_to_validate:
         if not target or target == "/dev/null":
@@ -1220,9 +1114,7 @@ async def apply_approved_patch(state: AgentState) -> dict[str, Any]:
                     "error": f"Absolute path escape detected: '{target}'",
                     "metadata": {"invalid_path": target},
                 },
-                "error": (
-                    f"Patch application failed: Absolute path escape detected: '{target}'"
-                ),
+                "error": (f"Patch application failed: Absolute path escape detected: '{target}'"),
                 "current_step": 4,
             }
 
