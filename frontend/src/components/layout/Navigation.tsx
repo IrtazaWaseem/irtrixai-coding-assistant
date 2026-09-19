@@ -47,27 +47,39 @@ export const Navigation: React.FC<NavigationProps> = ({
   onTabChange,
 }) => {
   return (
-    <nav className="border-b border-zinc-800/80 bg-zinc-950 px-6">
-      <div className="max-w-7xl mx-auto flex items-center justify-between overflow-x-auto py-2">
-        <div className="flex items-center gap-2">
+    <nav
+      aria-label="Console Navigation"
+      className="border-b border-zinc-800/80 bg-zinc-950/80 backdrop-blur-md px-4 sm:px-6"
+    >
+      <div className="max-w-7xl mx-auto flex items-center overflow-x-auto py-2 scrollbar-none">
+        <div className="flex items-center gap-1.5 sm:gap-2">
           {TABS.map(({ id, label, icon: Icon, primary }) => {
             const isActive = currentTab === id;
             return (
               <button
                 key={id}
                 onClick={() => onTabChange(id)}
-                className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-all ${
+                aria-current={isActive ? "page" : undefined}
+                className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-mono transition-all shrink-0 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-zinc-600 select-none ${
                   isActive
                     ? primary
-                      ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 shadow-sm"
-                      : "bg-zinc-800 text-zinc-100 border border-zinc-700 shadow-sm"
+                      ? "bg-emerald-950/40 text-emerald-300 border border-emerald-600/50 font-semibold shadow-sm shadow-emerald-950/30"
+                      : "bg-zinc-900 text-zinc-100 border border-zinc-700/90 font-semibold shadow-sm"
                     : primary
-                      ? "text-zinc-200 hover:text-emerald-300 hover:bg-zinc-900 border border-zinc-800/60"
-                      : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900"
+                      ? "text-zinc-300 hover:text-emerald-300 hover:bg-zinc-900/60 border border-zinc-800/60 hover:border-zinc-700"
+                      : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900/50 border border-transparent hover:border-zinc-800/60"
                 }`}
               >
                 <Icon
-                  className={`w-3.5 h-3.5 ${primary && isActive ? "text-emerald-400" : ""}`}
+                  className={`w-3.5 h-3.5 shrink-0 transition-colors ${
+                    primary
+                      ? isActive
+                        ? "text-emerald-400"
+                        : "text-emerald-500/70"
+                      : isActive
+                        ? "text-cyan-400"
+                        : "text-zinc-500"
+                  }`}
                 />
                 <span>{label}</span>
               </button>
