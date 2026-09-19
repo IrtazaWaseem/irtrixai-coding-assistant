@@ -1,9 +1,10 @@
 import React from "react";
-import { Check, Lock, ShieldCheck } from "lucide-react";
+import { Check, Lock, RotateCcw, ShieldAlert, ShieldCheck } from "lucide-react";
 
 export const GovernancePage: React.FC = () => {
   return (
     <div className="space-y-6">
+      {/* Header */}
       <div>
         <h1 className="text-xl font-bold text-zinc-100">
           Governance & Safety Policies
@@ -14,12 +15,20 @@ export const GovernancePage: React.FC = () => {
         </p>
       </div>
 
+      {/* 4-Card Governance Matrix */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-        {/* Container Boundaries */}
-        <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-5 space-y-3">
-          <div className="flex items-center gap-2 text-zinc-200 text-sm font-semibold">
-            <ShieldCheck className="w-4 h-4 text-emerald-400" />
-            <span>Docker Sandbox Isolation</span>
+        {/* Policy 1: Container Containment */}
+        <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-5 space-y-4 shadow-lg">
+          <div className="flex items-center gap-2.5 text-zinc-200 text-sm font-semibold">
+            <div className="p-2 rounded-lg bg-emerald-950/40 border border-emerald-800/40 text-emerald-400">
+              <ShieldCheck className="w-4 h-4" />
+            </div>
+            <div>
+              <span className="block">Docker Sandbox Isolation</span>
+              <span className="text-[10px] font-mono font-normal text-zinc-500">
+                Container Security Profiles
+              </span>
+            </div>
           </div>
           <ul className="text-xs text-zinc-400 space-y-2.5 font-mono">
             <li className="flex items-center gap-2">
@@ -32,37 +41,120 @@ export const GovernancePage: React.FC = () => {
             </li>
             <li className="flex items-center gap-2">
               <Check className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-              <span>Unprivileged sandbox user (UID 1000)</span>
+              <span>Unprivileged sandbox user execution (UID 1000)</span>
             </li>
             <li className="flex items-center gap-2">
               <Check className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-              <span>Linux capabilities dropped (--cap-drop=ALL)</span>
+              <span>All Linux capabilities dropped (--cap-drop=ALL)</span>
             </li>
           </ul>
         </div>
 
-        {/* Human-in-the-Loop & Invariants */}
-        <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-5 space-y-3">
-          <div className="flex items-center gap-2 text-zinc-200 text-sm font-semibold">
-            <Lock className="w-4 h-4 text-amber-400" />
-            <span>Execution Invariants</span>
+        {/* Policy 2: Human-in-the-Loop Gate */}
+        <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-5 space-y-4 shadow-lg">
+          <div className="flex items-center gap-2.5 text-zinc-200 text-sm font-semibold">
+            <div className="p-2 rounded-lg bg-amber-950/40 border border-amber-800/40 text-amber-400">
+              <ShieldAlert className="w-4 h-4" />
+            </div>
+            <div>
+              <span className="block">Human-in-the-Loop Gate</span>
+              <span className="text-[10px] font-mono font-normal text-zinc-500">
+                LangGraph Checkpoint Interrupt
+              </span>
+            </div>
           </div>
           <ul className="text-xs text-zinc-400 space-y-2.5 font-mono">
             <li className="flex items-center gap-2">
               <Check className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-              <span>Mandatory operator approval before disk mutation</span>
+              <span>Mandatory operator consent before filesystem mutation</span>
             </li>
             <li className="flex items-center gap-2">
               <Check className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-              <span>Repair loop bounded strictly to max 3 cycles</span>
+              <span>Unified diff preview required prior to write actions</span>
             </li>
             <li className="flex items-center gap-2">
               <Check className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+              <span>
+                Optional guidance feedback channel on proposal rejection
+              </span>
+            </li>
+            <li className="flex items-center gap-2">
+              <Check className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+              <span>Non-bypassable pause enforcing explicit confirmation</span>
+            </li>
+          </ul>
+        </div>
+
+        {/* Policy 3: Execution Boundaries & Limits */}
+        <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-5 space-y-4 shadow-lg">
+          <div className="flex items-center gap-2.5 text-zinc-200 text-sm font-semibold">
+            <div className="p-2 rounded-lg bg-cyan-950/40 border border-cyan-800/40 text-cyan-400">
+              <RotateCcw className="w-4 h-4" />
+            </div>
+            <div>
+              <span className="block">Execution Boundaries & Limits</span>
+              <span className="text-[10px] font-mono font-normal text-zinc-500">
+                Repair Budget Controls
+              </span>
+            </div>
+          </div>
+          <ul className="text-xs text-zinc-400 space-y-2.5 font-mono">
+            <li className="flex items-center gap-2">
+              <Check className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+              <span>
+                Automated repair loop bounded strictly to max 3 cycles
+              </span>
+            </li>
+            <li className="flex items-center gap-2">
+              <Check className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+              <span>Fail-closed evaluation on unverified test exits</span>
+            </li>
+            <li className="flex items-center gap-2">
+              <Check className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+              <span>
+                Pytest cache disabled (-p no:cacheprovider) on :ro mounts
+              </span>
+            </li>
+            <li className="flex items-center gap-2">
+              <Check className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+              <span>
+                Transactional checkpoint recovery backed by PostgreSQL 16
+              </span>
+            </li>
+          </ul>
+        </div>
+
+        {/* Policy 4: Workspace & Secret Protection */}
+        <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-5 space-y-4 shadow-lg">
+          <div className="flex items-center gap-2.5 text-zinc-200 text-sm font-semibold">
+            <div className="p-2 rounded-lg bg-blue-950/40 border border-blue-800/40 text-blue-400">
+              <Lock className="w-4 h-4" />
+            </div>
+            <div>
+              <span className="block">Workspace & Secret Protection</span>
+              <span className="text-[10px] font-mono font-normal text-zinc-500">
+                Filesystem Barriers
+              </span>
+            </div>
+          </div>
+          <ul className="text-xs text-zinc-400 space-y-2.5 font-mono">
+            <li className="flex items-center gap-2">
+              <Check className="w-3.5 h-3.5 text-blue-400 shrink-0" />
+              <span>
+                Protected file safeguards active (.env, .git, alembic.ini)
+              </span>
+            </li>
+            <li className="flex items-center gap-2">
+              <Check className="w-3.5 h-3.5 text-blue-400 shrink-0" />
+              <span>Path traversal and symlink boundary validation</span>
+            </li>
+            <li className="flex items-center gap-2">
+              <Check className="w-3.5 h-3.5 text-blue-400 shrink-0" />
               <span>Credential redaction for PostgreSQL URIs and LLM keys</span>
             </li>
             <li className="flex items-center gap-2">
-              <Check className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-              <span>Protected file safeguards active (.env, .git)</span>
+              <Check className="w-3.5 h-3.5 text-blue-400 shrink-0" />
+              <span>Zero client-side API key custody (FastAPI-mediated)</span>
             </li>
           </ul>
         </div>
