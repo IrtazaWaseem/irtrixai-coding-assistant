@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 from collections.abc import AsyncGenerator
@@ -24,6 +25,10 @@ from app.services.task_service import TaskService
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+# Concurrent execution locks to prevent race conditions across parallel requests
+_active_runs: set[str] = set()
+_active_runs_lock = asyncio.Lock()
 
 
 def get_agent_graph():
@@ -76,58 +81,63 @@ async def run_task(
             message="Checkpointer is not initialized.",
         )
 
-    task, should_execute = await TaskService.prepare_task_for_run(db, task_id, graph)
-    config = {"configurable": {"thread_id": task.thread_id}}
-
-    if not should_execute:
-        st = str(getattr(task, "status", "")).lower()
-        if "running" in st or task.status == TaskStatus.RUNNING:
+    # Concurrency guard: reject concurrent /run requests on the same task with 409 Conflict
+    async with _active_runs_lock:
+        if task_id in _active_runs:
             raise AppException(
                 status_code=409,
                 message=f"Task '{task_id}' is currently running.",
             )
+        _active_runs.add(task_id)
 
-        snap = await graph.aget_state(config)
-        if snap and snap.next == ("approval_gate",):
-            coder_prop = snap.values.get("coder_proposal")
-            coder_summary = (
-                coder_prop.summary
-                if hasattr(coder_prop, "summary")
+    try:
+        task, should_execute = await TaskService.prepare_task_for_run(db, task_id, graph)
+        config = {"configurable": {"thread_id": task.thread_id}}
+
+        if not should_execute:
+            st = str(getattr(task, "status", "")).lower()
+            if "running" in st or task.status == TaskStatus.RUNNING:
+                raise AppException(
+                    status_code=409,
+                    message=f"Task '{task_id}' is currently running.",
+                )
+
+            snap = await graph.aget_state(config)
+            if snap and snap.next == ("approval_gate",):
+                coder_prop = snap.values.get("coder_proposal")
+                coder_summary = (
+                    coder_prop.summary
+                    if hasattr(coder_prop, "summary")
+                    else (coder_prop.get("summary") if isinstance(coder_prop, dict) else None)
+                )
+                return ExecutionResponse(
+                    task_id=str(task.id),
+                    status="awaiting_approval",
+                    current_step=snap.values.get("current_step", 4),
+                    next_step="approval_gate",
+                    interrupt_payload={
+                        "action": "human_approval_required",
+                        "pending_patch": snap.values.get("pending_patch"),
+                        "coder_summary": coder_summary,
+                    },
+                )
+            final = snap.values.get("final_result") if snap else None
+            status = getattr(final, "status", None) or (
+                final.get("status")
+                if isinstance(final, dict)
                 else (
-                    coder_prop.get("summary") if isinstance(coder_prop, dict) else None
+                    task.status.value.lower()
+                    if hasattr(task.status, "value")
+                    else str(task.status).lower()
                 )
             )
             return ExecutionResponse(
                 task_id=str(task.id),
-                status="awaiting_approval",
-                current_step=snap.values.get("current_step", 4),
-                next_step="approval_gate",
-                interrupt_payload={
-                    "action": "human_approval_required",
-                    "pending_patch": snap.values.get("pending_patch"),
-                    "coder_summary": coder_summary,
-                },
+                status=status,
+                current_step=snap.values.get("current_step", 8) if snap else 8,
+                final_result=(final.model_dump() if hasattr(final, "model_dump") else final),
             )
-        final = snap.values.get("final_result") if snap else None
-        status = getattr(final, "status", None) or (
-            final.get("status")
-            if isinstance(final, dict)
-            else (
-                task.status.value.lower()
-                if hasattr(task.status, "value")
-                else str(task.status).lower()
-            )
-        )
-        return ExecutionResponse(
-            task_id=str(task.id),
-            status=status,
-            current_step=snap.values.get("current_step", 8) if snap else 8,
-            final_result=(
-                final.model_dump() if hasattr(final, "model_dump") else final
-            ),
-        )
 
-    try:
         snap = await graph.aget_state(config)
         if not snap or not snap.values:
             initial_state = create_initial_state(
@@ -148,9 +158,7 @@ async def run_task(
             coder_summary = (
                 coder_prop.summary
                 if hasattr(coder_prop, "summary")
-                else (
-                    coder_prop.get("summary") if isinstance(coder_prop, dict) else None
-                )
+                else (coder_prop.get("summary") if isinstance(coder_prop, dict) else None)
             )
             return ExecutionResponse(
                 task_id=str(task.id),
@@ -173,9 +181,7 @@ async def run_task(
             task_id=str(task.id),
             status=status,
             current_step=post_snap.values.get("current_step", 8),
-            final_result=(
-                final.model_dump() if hasattr(final, "model_dump") else final
-            ),
+            final_result=(final.model_dump() if hasattr(final, "model_dump") else final),
         )
 
     except AppException:
@@ -189,6 +195,9 @@ async def run_task(
             status="failed",
             error=clean_err,
         )
+    finally:
+        async with _active_runs_lock:
+            _active_runs.discard(task_id)
 
 
 @router.post("/{task_id}/approval", response_model=ExecutionResponse)
@@ -198,7 +207,16 @@ async def submit_approval(
     db: AsyncSession = Depends(get_db),
     graph=Depends(get_agent_graph),
 ) -> ExecutionResponse:
-    task = await TaskService.prepare_task_for_approval(db, task_id)
+    try:
+        task = await TaskService.prepare_task_for_approval(db, task_id)
+    except AppException as err:
+        if err.status_code == 409:
+            raise AppException(
+                status_code=400,
+                message=f"Task '{task_id}' is not currently awaiting human approval.",
+            )
+        raise
+
     config = {"configurable": {"thread_id": task.thread_id}}
 
     try:
@@ -213,9 +231,7 @@ async def submit_approval(
                 message=f"Task '{task_id}' is not currently awaiting human approval.",
             )
 
-        resume_cmd = Command(
-            resume={"approved": payload.approved, "feedback": payload.feedback}
-        )
+        resume_cmd = Command(resume={"approved": payload.approved, "feedback": payload.feedback})
         await graph.ainvoke(resume_cmd, config=config)
 
         post_snap = await graph.aget_state(config)
@@ -226,9 +242,7 @@ async def submit_approval(
             coder_summary = (
                 coder_prop.summary
                 if hasattr(coder_prop, "summary")
-                else (
-                    coder_prop.get("summary") if isinstance(coder_prop, dict) else None
-                )
+                else (coder_prop.get("summary") if isinstance(coder_prop, dict) else None)
             )
             return ExecutionResponse(
                 task_id=str(task.id),
@@ -251,9 +265,7 @@ async def submit_approval(
             task_id=str(task.id),
             status=status,
             current_step=post_snap.values.get("current_step", 8),
-            final_result=(
-                final.model_dump() if hasattr(final, "model_dump") else final
-            ),
+            final_result=(final.model_dump() if hasattr(final, "model_dump") else final),
         )
     except AppException:
         raise
@@ -293,9 +305,7 @@ async def stream_task_events(
                 {
                     "task_id": str(task.id),
                     "status": "pending",
-                    "message": (
-                        "Task has not been started. Trigger execution via POST /run."
-                    ),
+                    "message": ("Task has not been started. Trigger execution via POST /run."),
                 },
             )
 
@@ -303,9 +313,7 @@ async def stream_task_events(
 
     async def event_generator() -> AsyncGenerator[str, None]:
         st = (
-            task.status.value.lower()
-            if hasattr(task.status, "value")
-            else str(task.status).lower()
+            task.status.value.lower() if hasattr(task.status, "value") else str(task.status).lower()
         )
         yield _format_sse("task_started", {"task_id": str(task.id), "status": st})
 
@@ -409,11 +417,7 @@ async def stream_task_events(
                 coder_summary = (
                     coder_prop.summary
                     if hasattr(coder_prop, "summary")
-                    else (
-                        coder_prop.get("summary")
-                        if isinstance(coder_prop, dict)
-                        else None
-                    )
+                    else (coder_prop.get("summary") if isinstance(coder_prop, dict) else None)
                 )
                 yield _format_sse(
                     "approval_required",
@@ -430,9 +434,7 @@ async def stream_task_events(
                 fin_status = getattr(fin, "status", None) or (
                     fin.get("status") if isinstance(fin, dict) else "completed"
                 )
-                ev_name = (
-                    "task_completed" if fin_status == "completed" else "task_failed"
-                )
+                ev_name = "task_completed" if fin_status == "completed" else "task_failed"
                 yield _format_sse(
                     ev_name,
                     {
