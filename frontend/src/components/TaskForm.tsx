@@ -7,6 +7,7 @@ import {
   Plus,
   RotateCw,
 } from "lucide-react";
+import { useTaskExecution } from "../context/TaskContext";
 import { createWorkspace, getProviders, getWorkspaces } from "../services/api";
 import { ProviderOption, WorkspaceResponse } from "../types";
 
@@ -21,6 +22,8 @@ interface TaskFormProps {
 }
 
 export const TaskForm: React.FC<TaskFormProps> = ({ onSubmit, isLoading }) => {
+  const { setActiveWorkspaceId } = useTaskExecution();
+
   const [workspaces, setWorkspaces] = useState<WorkspaceResponse[]>([]);
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string>("");
   const [prompt, setPrompt] = useState("");
@@ -57,6 +60,7 @@ export const TaskForm: React.FC<TaskFormProps> = ({ onSubmit, isLoading }) => {
       setWorkspaces(wsList);
       if (wsList.length > 0) {
         setSelectedWorkspaceId(wsList[0].id);
+        setActiveWorkspaceId(wsList[0].id);
       }
 
       setProviders(provData.providers);
@@ -95,6 +99,7 @@ export const TaskForm: React.FC<TaskFormProps> = ({ onSubmit, isLoading }) => {
       const updatedList = await getWorkspaces();
       setWorkspaces(updatedList);
       setSelectedWorkspaceId(created.id);
+      setActiveWorkspaceId(created.id);
     } catch (err: any) {
       setAddError(err.message || "Workspace registration failed.");
     } finally {
@@ -338,7 +343,10 @@ export const TaskForm: React.FC<TaskFormProps> = ({ onSubmit, isLoading }) => {
                   id="workspace-select"
                   disabled={isLoading}
                   value={selectedWorkspaceId}
-                  onChange={(e) => setSelectedWorkspaceId(e.target.value)}
+                  onChange={(e) => {
+                    setSelectedWorkspaceId(e.target.value);
+                    setActiveWorkspaceId(e.target.value);
+                  }}
                   className="w-full px-3.5 py-2 text-sm bg-zinc-950 border border-zinc-800 rounded-lg text-zinc-200 focus:outline-none focus:border-indigo-500 font-mono transition-colors disabled:opacity-50 appearance-none pr-8 cursor-pointer"
                 >
                   {workspaces.map((ws) => (

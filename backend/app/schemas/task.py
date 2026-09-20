@@ -32,6 +32,7 @@ class TaskCreate(BaseModel):
 
 class TaskResponse(BaseModel):
     id: str
+    workspace_id: str | None = None
     workspace_path: str
     prompt: str
     thread_id: str
@@ -56,6 +57,12 @@ class TaskResponse(BaseModel):
         if not ws_path and getattr(task, "workspace", None):
             ws_path = getattr(task.workspace, "root_path", "")
 
+        ws_id = None
+        if getattr(task, "workspace_id", None):
+            ws_id = str(task.workspace_id)
+        elif getattr(task, "workspace", None) and hasattr(task.workspace, "id"):
+            ws_id = str(task.workspace.id)
+
         t_id = getattr(task, "thread_id", "")
         if not t_id and getattr(task, "runs", None) and len(task.runs) > 0:
             t_id = task.runs[0].thread_id
@@ -66,6 +73,7 @@ class TaskResponse(BaseModel):
 
         return cls(
             id=str(task.id),
+            workspace_id=ws_id,
             workspace_path=ws_path,
             prompt=task.prompt,
             thread_id=t_id,

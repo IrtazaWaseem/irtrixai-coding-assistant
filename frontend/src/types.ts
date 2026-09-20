@@ -45,7 +45,7 @@ export interface FinalResult {
   tests: string[];
 }
 
-// ==================== Phase 2A Additions ====================
+// ==================== Workspace & Filesystem Interfaces ====================
 
 export interface FileNode {
   name: string;
@@ -70,6 +70,24 @@ export interface WorkspaceTreeResponse {
   total_entries: number;
 }
 
+export interface WorkspaceFileResponse {
+  workspace_id: string;
+  path: string;
+  content: string;
+  size: number;
+  total_lines: number;
+  truncated: boolean;
+}
+
+export interface WorkspaceFileWriteResponse {
+  workspace_id: string;
+  path: string;
+  bytes_written: number;
+  is_new_file: boolean;
+}
+
+// ==================== System & LLM Interfaces ====================
+
 export interface SystemStatusResponse {
   status: string;
   version: string;
@@ -91,6 +109,7 @@ export interface LLMInfoResponse {
   models?: string[];
   fallback_provider?: string | null;
 }
+
 export interface ProviderOption {
   id: string;
   name: string;
@@ -106,6 +125,8 @@ export interface ProvidersResponse {
   default_model: string;
 }
 
+// ==================== Task Interfaces ====================
+
 export interface TaskCreatePayload {
   workspace_id?: string;
   workspace_path?: string;
@@ -116,6 +137,7 @@ export interface TaskCreatePayload {
 
 export interface TaskResponse {
   id: string;
+  workspace_id?: string;
   workspace_path?: string;
   prompt?: string;
   thread_id?: string;

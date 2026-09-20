@@ -5,6 +5,8 @@ import {
   ProvidersResponse,
   SystemStatusResponse,
   TaskResponse,
+  WorkspaceFileResponse,
+  WorkspaceFileWriteResponse,
   WorkspaceResponse,
   WorkspaceTreeResponse,
 } from "../types";
@@ -197,6 +199,38 @@ export async function getWorkspaceTree(
     },
   );
   return handleResponse<WorkspaceTreeResponse>(res);
+}
+
+export async function getWorkspaceFile(
+  workspaceId: string,
+  relativePath: string,
+): Promise<WorkspaceFileResponse> {
+  const cleanPath = relativePath.replace(/^\/+/, "");
+  const res = await fetch(
+    `${API_BASE}/api/v1/workspaces/${workspaceId}/files/${encodeURIComponent(cleanPath).replace(/%2F/g, "/")}`,
+    {
+      method: "GET",
+      headers: { Accept: "application/json" },
+    },
+  );
+  return handleResponse<WorkspaceFileResponse>(res);
+}
+
+export async function saveWorkspaceFile(
+  workspaceId: string,
+  relativePath: string,
+  content: string,
+): Promise<WorkspaceFileWriteResponse> {
+  const cleanPath = relativePath.replace(/^\/+/, "");
+  const res = await fetch(
+    `${API_BASE}/api/v1/workspaces/${workspaceId}/files/${encodeURIComponent(cleanPath).replace(/%2F/g, "/")}`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content }),
+    },
+  );
+  return handleResponse<WorkspaceFileWriteResponse>(res);
 }
 
 export async function getSystemStatus(): Promise<SystemStatusResponse> {

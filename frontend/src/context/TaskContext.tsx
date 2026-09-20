@@ -22,6 +22,8 @@ import {
 
 export interface TaskContextType {
   taskId: string | null;
+  activeWorkspaceId: string | null;
+  setActiveWorkspaceId: (id: string | null) => void;
   status: string;
   events: ActivityEvent[];
   pendingPatch: string | null;
@@ -34,7 +36,7 @@ export interface TaskContextType {
   isSubmittingApproval: boolean;
   connectionState: "connected" | "reconnecting" | "disconnected" | "idle";
   handleStartTask: (
-    wsPath: string,
+    wsPathOrId: string,
     userPrompt: string,
     provider?: string,
     model?: string,
@@ -50,6 +52,9 @@ export const TaskProvider: React.FC<{ children: React.ReactNode }> = ({
   children,
 }) => {
   const [taskId, setTaskId] = useState<string | null>(null);
+  const [activeWorkspaceId, setActiveWorkspaceId] = useState<string | null>(
+    null,
+  );
   const [status, setStatus] = useState<string>("idle");
   const [events, setEvents] = useState<ActivityEvent[]>([]);
   const [pendingPatch, setPendingPatch] = useState<string | null>(null);
@@ -336,6 +341,9 @@ export const TaskProvider: React.FC<{ children: React.ReactNode }> = ({
       setIsLoading(true);
       getTask(savedTaskId)
         .then((t) => {
+          if (t.workspace_id) {
+            setActiveWorkspaceId(t.workspace_id);
+          }
           const st = t.status.toLowerCase();
           setStatus(st);
           addEvent(
@@ -362,7 +370,7 @@ export const TaskProvider: React.FC<{ children: React.ReactNode }> = ({
   }, [connectSSE, addEvent, cleanupSSE]);
 
   const handleStartTask = async (
-    wsPath: string,
+    wsPathOrId: string,
     userPrompt: string,
     provider?: string,
     model?: string,
@@ -378,8 +386,18 @@ export const TaskProvider: React.FC<{ children: React.ReactNode }> = ({
     cleanupSSE();
 
     try {
-      const created = await createTask(wsPath, userPrompt, provider, model);
+      const created = await createTask(wsPathOrId, userPrompt, provider, model);
       setTaskId(created.id);
+      if (created.workspace_id) {
+        setActiveWorkspaceId(created.workspace_id);
+      } else if (
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+          wsPathOrId,
+        )
+      ) {
+        setActiveWorkspaceId(wsPathOrId);
+      }
+
       setStatus("running");
       localStorage.setItem("irtrixai_active_task_id", created.id);
 
@@ -461,6 +479,7 @@ export const TaskProvider: React.FC<{ children: React.ReactNode }> = ({
   const handleReset = () => {
     cleanupSSE();
     localStorage.removeItem("irtrixai_active_task_id");
+    setActiveWorkspaceId(null);
     window.location.href = window.location.pathname;
   };
 
@@ -468,6 +487,8 @@ export const TaskProvider: React.FC<{ children: React.ReactNode }> = ({
     <TaskContext.Provider
       value={{
         taskId,
+        activeWorkspaceId,
+        setActiveWorkspaceId,
         status,
         events,
         pendingPatch,

@@ -15,20 +15,22 @@ import {
   TestTube2,
   Wrench,
 } from "lucide-react";
-import { TaskForm } from "../components/TaskForm";
-import { Timeline } from "../components/Timeline";
 import { ApprovalGate } from "../components/ApprovalGate";
+import { CodeWorkspace } from "../components/CodeWorkspace";
 import { DiffViewer } from "../components/DiffViewer";
-import { TestResults } from "../components/TestResults";
-import { ReviewOutcome } from "../components/ReviewOutcome";
 import { FinalResult } from "../components/FinalResult";
+import { ReviewOutcome } from "../components/ReviewOutcome";
+import { TaskForm } from "../components/TaskForm";
+import { TestResults } from "../components/TestResults";
+import { Timeline } from "../components/Timeline";
 import { useTaskExecution } from "../context/TaskContext";
 
-type WorkspaceTab = "stage" | "diff" | "timeline" | "evidence";
+type WorkspaceTab = "stage" | "editor" | "diff" | "timeline" | "evidence";
 
 export const HomePage: React.FC = () => {
   const {
     taskId,
+    activeWorkspaceId,
     status,
     events,
     pendingPatch,
@@ -346,27 +348,41 @@ export const HomePage: React.FC = () => {
         {/* RIGHT PANE: Focused Execution Workspace */}
         <div className="lg:col-span-8 space-y-4 flex flex-col">
           {!taskId ? (
-            <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-6 space-y-4">
-              <div>
-                <h2 className="text-base font-semibold text-zinc-100">
-                  Initiate Code Agent Task
-                </h2>
-                <p className="text-xs text-zinc-400 mt-1">
-                  Provide an absolute workspace root path and specific technical
-                  objective.
-                </p>
+            <div className="space-y-4">
+              <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-6 space-y-4">
+                <div>
+                  <h2 className="text-base font-semibold text-zinc-100">
+                    Initiate Code Agent Task
+                  </h2>
+                  <p className="text-xs text-zinc-400 mt-1">
+                    Select a registered workspace and specify technical
+                    implementation instructions.
+                  </p>
+                </div>
+                <TaskForm onSubmit={handleStartTask} isLoading={isLoading} />
+                {error && (
+                  <div className="bg-rose-950/40 border border-rose-800 text-rose-300 p-4 rounded-xl text-xs">
+                    <span className="font-semibold">Error: </span>
+                    {error}
+                  </div>
+                )}
               </div>
-              <TaskForm onSubmit={handleStartTask} isLoading={isLoading} />
-              {error && (
-                <div className="bg-rose-950/40 border border-rose-800 text-rose-300 p-4 rounded-xl text-xs">
-                  <span className="font-semibold">Error: </span>
-                  {error}
+
+              {activeWorkspaceId && (
+                <div className="space-y-2">
+                  <div className="flex items-center gap-2 text-xs font-mono text-zinc-400 px-1">
+                    <Code2 className="w-3.5 h-3.5 text-indigo-400" />
+                    <span className="uppercase tracking-wider font-semibold">
+                      Workspace Explorer & Editor
+                    </span>
+                  </div>
+                  <CodeWorkspace workspaceId={activeWorkspaceId} />
                 </div>
               )}
             </div>
           ) : (
             <div className="space-y-4 flex-1 flex flex-col">
-              {/* 4 Conceptual Workspace Tabs */}
+              {/* Workspace Navigation Tabs */}
               <div className="flex items-center gap-2 border-b border-zinc-800 pb-2">
                 <button
                   onClick={() => setActiveTab("stage")}
@@ -377,6 +393,17 @@ export const HomePage: React.FC = () => {
                   }`}
                 >
                   Active Stage
+                </button>
+                <button
+                  onClick={() => setActiveTab("editor")}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors flex items-center gap-1.5 ${
+                    activeTab === "editor"
+                      ? "bg-zinc-800 text-zinc-100 font-semibold"
+                      : "text-zinc-400 hover:text-zinc-200"
+                  }`}
+                >
+                  <Code2 className="w-3.5 h-3.5 text-indigo-400" />
+                  <span>Code Workspace</span>
                 </button>
                 <button
                   onClick={() => setActiveTab("diff")}
@@ -517,21 +544,28 @@ export const HomePage: React.FC = () => {
                 </div>
               )}
 
-              {/* Tab 2: Unified Diff */}
+              {/* Tab 2: Code Workspace */}
+              {activeTab === "editor" && (
+                <div className="space-y-4 flex-1">
+                  <CodeWorkspace workspaceId={activeWorkspaceId} />
+                </div>
+              )}
+
+              {/* Tab 3: Unified Diff */}
               {activeTab === "diff" && (
                 <div className="space-y-3">
                   <DiffViewer patch={pendingPatch} />
                 </div>
               )}
 
-              {/* Tab 3: Event Trace */}
+              {/* Tab 4: Event Trace */}
               {activeTab === "timeline" && (
                 <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4 flex-1 max-h-[620px] overflow-y-auto">
                   <Timeline events={events} />
                 </div>
               )}
 
-              {/* Tab 4: Verification Evidence */}
+              {/* Tab 5: Verification Evidence */}
               {activeTab === "evidence" && (
                 <div className="space-y-4">
                   {testResult || reviewResult ? (
