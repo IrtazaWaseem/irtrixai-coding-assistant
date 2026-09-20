@@ -90,7 +90,7 @@ class TaskService:
         Returns (task, should_execute):
         - If should_execute is True, caller is the exclusive runner and must execute graph.
         - If should_execute is False, task is already at approval_gate or completed.
-        - Raises AppException(409) if task is currently RUNNING.
+        - Raises AppException(409) if task is currently RUNNING or if another task is active in this workspace.
         """
         try:
             task_uuid = uuid.UUID(task_id) if isinstance(task_id, str) else task_id
@@ -114,6 +114,7 @@ class TaskService:
                 message=f"Task '{task_id}' not found.",
             )
 
+        # 1. Same-task duplicate protection
         if task.status == TaskStatus.RUNNING:
             raise AppException(
                 status_code=409,
@@ -128,9 +129,42 @@ class TaskService:
             await db.commit()
             return task, False
 
+        # 2. Workspace-level concurrency protection: lock workspace row across workers
+        ws_stmt = select(Workspace).where(Workspace.id == task.workspace_id).with_for_update()
+        ws_res = await db.execute(ws_stmt)
+        workspace = ws_res.scalar_one_or_none()
+
+        # Check for any other active task in the same physical workspace
+        active_stmt = (
+            select(Task)
+            .options(selectinload(Task.workspace), selectinload(Task.runs))
+            .where(
+                Task.workspace_id == task.workspace_id,
+                Task.id != task.id,
+                Task.status.in_([TaskStatus.RUNNING, TaskStatus.AWAITING_APPROVAL]),
+            )
+            .with_for_update()
+        )
+        active_res = await db.execute(active_stmt)
+        other_active_tasks = active_res.scalars().all()
+
+        for other_task in other_active_tasks:
+            if other_task.status == TaskStatus.RUNNING and graph is not None:
+                other_task = await TaskService.reconcile_task_status(db, other_task, graph)
+
+            if other_task.status in (TaskStatus.RUNNING, TaskStatus.AWAITING_APPROVAL):
+                ws_name = workspace.root_path if workspace else str(task.workspace_id)
+                raise AppException(
+                    status_code=409,
+                    message=(
+                        f"Workspace '{ws_name}' is currently in use by task "
+                        f"'{other_task.id}' (status: {other_task.status.value.lower()})."
+                    ),
+                )
+
         # Transition PENDING -> RUNNING atomically under the lock
         task.status = TaskStatus.RUNNING
-        if task.runs and len(task.runs) > 0:
+        if "runs" in task.__dict__ and task.runs and len(task.runs) > 0:
             task.runs[-1].status = TaskStatus.RUNNING
         db.add(task)
         await db.commit()
@@ -170,8 +204,36 @@ class TaskService:
                 message=f"Task '{task_id}' is not currently awaiting human approval.",
             )
 
+        # Lock workspace row to ensure serialized access
+        ws_stmt = select(Workspace).where(Workspace.id == task.workspace_id).with_for_update()
+        ws_res = await db.execute(ws_stmt)
+        workspace = ws_res.scalar_one_or_none()
+
+        # Verify no other task has claimed the workspace
+        active_stmt = (
+            select(Task)
+            .options(selectinload(Task.workspace), selectinload(Task.runs))
+            .where(
+                Task.workspace_id == task.workspace_id,
+                Task.id != task.id,
+                Task.status.in_([TaskStatus.RUNNING, TaskStatus.AWAITING_APPROVAL]),
+            )
+            .with_for_update()
+        )
+        active_res = await db.execute(active_stmt)
+        other_active = active_res.scalars().first()
+        if other_active:
+            ws_name = workspace.root_path if workspace else str(task.workspace_id)
+            raise AppException(
+                status_code=409,
+                message=(
+                    f"Workspace '{ws_name}' is currently in use by task "
+                    f"'{other_active.id}' (status: {other_active.status.value.lower()})."
+                ),
+            )
+
         task.status = TaskStatus.RUNNING
-        if task.runs and len(task.runs) > 0:
+        if "runs" in task.__dict__ and task.runs and len(task.runs) > 0:
             task.runs[-1].status = TaskStatus.RUNNING
         db.add(task)
         await db.commit()
@@ -204,12 +266,24 @@ class TaskService:
 
             if not snap or not snap.values:
                 if task.status == TaskStatus.RUNNING:
-                    return await TaskService.update_task_status(
-                        db,
-                        task,
-                        "failed",
-                        error="Execution interrupted before first checkpoint.",
-                    )
+                    # If the task has an active run started within the last 5 seconds,
+                    # it is actively executing its first step and has not yet checkpointed.
+                    # Do not prematurely mark it as failed.
+                    is_recently_started = False
+                    if "runs" in task.__dict__ and task.runs and len(task.runs) > 0:
+                        latest_run = task.runs[-1]
+                        if latest_run.started_at:
+                            delta = (datetime.now(UTC) - latest_run.started_at).total_seconds()
+                            if delta < 5.0:
+                                is_recently_started = True
+
+                    if not is_recently_started:
+                        return await TaskService.update_task_status(
+                            db,
+                            task,
+                            "failed",
+                            error="Execution interrupted before first checkpoint.",
+                        )
                 return task
 
             if snap.next == ("approval_gate",):
@@ -267,7 +341,7 @@ class TaskService:
         elif status_upper in ("ABORTED", "CANCELLED"):
             task.status = TaskStatus.CANCELLED
 
-        if task.runs and len(task.runs) > 0:
+        if "runs" in task.__dict__ and task.runs and len(task.runs) > 0:
             latest_run = task.runs[-1]
             latest_run.status = task.status
             if error:

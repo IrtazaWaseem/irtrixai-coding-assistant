@@ -1199,3 +1199,58 @@ async def test_real_file_mutation_e2e_rejected_patch_preserves_disk(tmp_path: Pa
         app.dependency_overrides.clear()
         settings.WORKSPACE_BASE_PATH = original_base
         set_llm_gateway(None)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_different_tasks_same_workspace_run_protection(tmp_path: Path):
+    """Proves two DIFFERENT tasks created in the SAME workspace cannot run concurrently via API."""
+    ws = tmp_path / "ws_same_ws_race_api"
+    ws.mkdir(parents=True, exist_ok=True)
+    init_test_git_repo(ws)
+
+    mock_gw = MagicMock(spec=LLMGateway)
+
+    async def mock_structured(prompt, response_schema, **kwargs):
+        await asyncio.sleep(0.05)
+        if response_schema is PlannerOutput:
+            return PlannerOutput(summary="Plan", steps=["S1"], files_expected=["x.py"])
+        if response_schema is CoderOutput:
+            return CoderOutput(summary="Code", patch="diff", files_changed=["x.py"])
+        return response_schema.model_validate({})
+
+    mock_gw.generate_structured = AsyncMock(side_effect=mock_structured)
+    set_llm_gateway(mock_gw)
+
+    memory_saver = MemorySaver()
+    test_graph = build_agent_graph(checkpointer=memory_saver)
+    app.dependency_overrides[get_agent_graph] = lambda: test_graph
+
+    original_base = settings.WORKSPACE_BASE_PATH
+    settings.WORKSPACE_BASE_PATH = tmp_path.resolve()
+
+    transport = ASGITransport(app=app)
+    try:
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            r1 = await client.post(
+                "/api/v1/tasks",
+                json={"workspace_path": str(ws), "prompt": "Task 1"},
+            )
+            r2 = await client.post(
+                "/api/v1/tasks",
+                json={"workspace_path": str(ws), "prompt": "Task 2"},
+            )
+            assert r1.status_code == 201
+            assert r2.status_code == 201
+            id1, id2 = r1.json()["id"], r2.json()["id"]
+
+            res_a, res_b = await asyncio.gather(
+                client.post(f"/api/v1/tasks/{id1}/run"),
+                client.post(f"/api/v1/tasks/{id2}/run"),
+            )
+            statuses = [res_a.status_code, res_b.status_code]
+            assert 200 in statuses
+            assert 409 in statuses
+    finally:
+        app.dependency_overrides.clear()
+        settings.WORKSPACE_BASE_PATH = original_base
+        set_llm_gateway(None)

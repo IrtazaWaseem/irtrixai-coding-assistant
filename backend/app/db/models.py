@@ -73,11 +73,13 @@ class Task(Base, TimestampMixin):
 
     @property
     def workspace_path(self) -> str:
-        return self.workspace.root_path if self.workspace else ""
+        if "workspace" in self.__dict__ and self.workspace:
+            return self.workspace.root_path
+        return ""
 
     @property
     def thread_id(self) -> str:
-        if self.runs and len(self.runs) > 0:
+        if "runs" in self.__dict__ and self.runs and len(self.runs) > 0:
             return self.runs[0].thread_id
         return f"thread-{self.id}"
 
