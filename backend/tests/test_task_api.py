@@ -974,3 +974,228 @@ async def test_reconcile_task_status_full_matrix(
 
     reconciled = await TaskService.reconcile_task_status(mock_db, task, mock_graph)
     assert reconciled.status == expected_status
+
+
+@pytest.mark.asyncio
+async def test_real_file_mutation_e2e_approved_patch_mutates_disk(tmp_path: Path):
+    """Phase 13A-2: Proves through real HTTP/API + LangGraph approval flow that
+    an approved patch directly mutates a real file on disk.
+    """
+    ws = tmp_path / "ws_real_mutation_approved"
+    ws.mkdir(parents=True, exist_ok=True)
+
+    target_file = ws / "math_service.py"
+    initial_content = "def add(a: int, b: int) -> int:\n    return a - b\n"
+    target_file.write_text(initial_content, encoding="utf-8")
+    init_test_git_repo(ws)
+
+    patch_text = (
+        "--- a/math_service.py\n"
+        "+++ b/math_service.py\n"
+        "@@ -1,2 +1,2 @@\n"
+        " def add(a: int, b: int) -> int:\n"
+        "-    return a - b\n"
+        "+    return a + b\n"
+    )
+
+    mock_gw = MagicMock(spec=LLMGateway)
+
+    async def mock_structured(prompt, response_schema, **kwargs):
+        if response_schema is PlannerOutput:
+            return PlannerOutput(
+                summary="Plan fix",
+                steps=["Fix add function"],
+                files_expected=["math_service.py"],
+            )
+        if response_schema is CoderOutput:
+            return CoderOutput(
+                summary="Fixed subtraction to addition",
+                patch=patch_text,
+                files_changed=["math_service.py"],
+            )
+        if response_schema is ReviewerOutput:
+            return ReviewerOutput(
+                verdict="approved",
+                summary="Fix verified and approved",
+                issues=[],
+                security_concerns=[],
+                required_changes=[],
+            )
+        return response_schema.model_validate({})
+
+    mock_gw.generate_structured = AsyncMock(side_effect=mock_structured)
+    set_llm_gateway(mock_gw)
+
+    mock_exec = MagicMock()
+    mock_exec.execute_in_sandbox.return_value = {
+        "command": "pytest",
+        "exit_code": 0,
+        "stdout": "1 passed in 0.01s",
+        "stderr": "",
+        "success": True,
+    }
+    set_execution_service(mock_exec)
+
+    memory_saver = MemorySaver()
+    test_graph = build_agent_graph(checkpointer=memory_saver)
+    app.dependency_overrides[get_agent_graph] = lambda: test_graph
+
+    original_base = settings.WORKSPACE_BASE_PATH
+    settings.WORKSPACE_BASE_PATH = tmp_path.resolve()
+
+    transport = ASGITransport(app=app)
+    try:
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            # 1. Real HTTP API task creation
+            create_res = await client.post(
+                "/api/v1/tasks",
+                json={
+                    "workspace_path": str(ws),
+                    "prompt": "Fix addition bug in math_service.py",
+                },
+            )
+            assert create_res.status_code == 201
+            task_id = create_res.json()["id"]
+
+            # Invariant 1: File on disk before run is completely untouched
+            assert target_file.read_text(encoding="utf-8") == initial_content
+
+            # 2. Real HTTP API task run
+            run_res = await client.post(f"/api/v1/tasks/{task_id}/run")
+            assert run_res.status_code == 200
+            run_data = run_res.json()
+            assert run_data["status"] == "awaiting_approval"
+            assert run_data["next_step"] == "approval_gate"
+            assert run_data["interrupt_payload"]["action"] == "human_approval_required"
+            assert run_data["interrupt_payload"]["pending_patch"] == patch_text
+
+            # Invariant 2: File on disk while awaiting approval is STILL completely untouched
+            assert target_file.read_text(encoding="utf-8") == initial_content
+
+            # 3. Real HTTP API operator approval
+            approval_res = await client.post(
+                f"/api/v1/tasks/{task_id}/approval",
+                json={"approved": True, "feedback": "Approved fix"},
+            )
+            assert approval_res.status_code == 200
+            approval_data = approval_res.json()
+            assert approval_data["status"] == "completed"
+            assert "math_service.py" in approval_data["final_result"]["files_changed"]
+
+            # 4. Proves real on-disk mutation: contents changed exactly as expected
+            expected_content = "def add(a: int, b: int) -> int:\n    return a + b\n"
+            actual_content = target_file.read_text(encoding="utf-8")
+            assert actual_content == expected_content
+
+            # 5. Proves approved patch was the mutation source via real git diff
+            git_diff = subprocess.run(
+                ["git", "diff"],
+                cwd=str(ws),
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            assert "-    return a - b" in git_diff.stdout
+            assert "+    return a + b" in git_diff.stdout
+    finally:
+        app.dependency_overrides.clear()
+        settings.WORKSPACE_BASE_PATH = original_base
+        set_llm_gateway(None)
+        set_execution_service(None)
+
+
+@pytest.mark.asyncio
+async def test_real_file_mutation_e2e_rejected_patch_preserves_disk(tmp_path: Path):
+    """Phase 13A-2: Proves through real HTTP/API + LangGraph approval flow that
+    a rejected patch causes zero filesystem mutations on disk.
+    """
+    ws = tmp_path / "ws_real_mutation_rejected"
+    ws.mkdir(parents=True, exist_ok=True)
+
+    target_file = ws / "math_service.py"
+    initial_content = "def add(a: int, b: int) -> int:\n    return a - b\n"
+    target_file.write_text(initial_content, encoding="utf-8")
+    init_test_git_repo(ws)
+
+    patch_text = (
+        "--- a/math_service.py\n"
+        "+++ b/math_service.py\n"
+        "@@ -1,2 +1,2 @@\n"
+        " def add(a: int, b: int) -> int:\n"
+        "-    return a - b\n"
+        "+    return a * b\n"
+    )
+
+    mock_gw = MagicMock(spec=LLMGateway)
+
+    async def mock_structured(prompt, response_schema, **kwargs):
+        if response_schema is PlannerOutput:
+            return PlannerOutput(
+                summary="Plan fix",
+                steps=["Fix add function"],
+                files_expected=["math_service.py"],
+            )
+        if response_schema is CoderOutput:
+            return CoderOutput(
+                summary="Malicious multiply edit",
+                patch=patch_text,
+                files_changed=["math_service.py"],
+            )
+        return response_schema.model_validate({})
+
+    mock_gw.generate_structured = AsyncMock(side_effect=mock_structured)
+    set_llm_gateway(mock_gw)
+
+    memory_saver = MemorySaver()
+    test_graph = build_agent_graph(checkpointer=memory_saver)
+    app.dependency_overrides[get_agent_graph] = lambda: test_graph
+
+    original_base = settings.WORKSPACE_BASE_PATH
+    settings.WORKSPACE_BASE_PATH = tmp_path.resolve()
+
+    transport = ASGITransport(app=app)
+    try:
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            # 1. Real HTTP API task creation
+            create_res = await client.post(
+                "/api/v1/tasks",
+                json={
+                    "workspace_path": str(ws),
+                    "prompt": "Reject this change",
+                },
+            )
+            assert create_res.status_code == 201
+            task_id = create_res.json()["id"]
+
+            # 2. Real HTTP API task run
+            run_res = await client.post(f"/api/v1/tasks/{task_id}/run")
+            assert run_res.status_code == 200
+            assert run_res.json()["status"] == "awaiting_approval"
+
+            # Invariant: File on disk is untouched before rejection
+            assert target_file.read_text(encoding="utf-8") == initial_content
+
+            # 3. Real HTTP API operator rejection (terminal abort without revision feedback)
+            reject_res = await client.post(
+                f"/api/v1/tasks/{task_id}/approval",
+                json={"approved": False},
+            )
+            assert reject_res.status_code == 200
+            assert reject_res.json()["status"] in ("aborted", "cancelled")
+
+            # 4. Proves zero on-disk mutation: content remains identical to initial
+            assert target_file.read_text(encoding="utf-8") == initial_content
+
+            # 5. Git diff confirms zero modifications in workspace
+            git_diff = subprocess.run(
+                ["git", "diff"],
+                cwd=str(ws),
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            assert git_diff.stdout.strip() == ""
+    finally:
+        app.dependency_overrides.clear()
+        settings.WORKSPACE_BASE_PATH = original_base
+        set_llm_gateway(None)
