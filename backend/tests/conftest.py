@@ -135,13 +135,13 @@ async def setup_test_database():
 @pytest.fixture(autouse=True)
 def guard_database_url_in_tests(request):
     """
-    Guarantees that any test requesting database fixtures or marked as database integration
+    Guarantees that any test requesting database fixtures or marked as requiring postgres
     fails immediately if TEST_DATABASE_URL is not set.
     """
     db_fixtures = {"db_session", "client", "sample_workspace"}
-    requires_db = any(f in request.fixturenames for f in db_fixtures) or (
-        request.node.get_closest_marker("postgres") is not None
-        or request.node.get_closest_marker("integration") is not None
+    requires_db = (
+        any(f in request.fixturenames for f in db_fixtures)
+        or request.node.get_closest_marker("postgres") is not None
     )
     if requires_db:
         get_test_database_url()
