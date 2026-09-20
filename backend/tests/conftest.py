@@ -5,6 +5,7 @@ import asyncpg
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
@@ -124,6 +125,8 @@ async def setup_test_database():
     init_engine = create_async_engine(test_url, poolclass=NullPool, echo=False)
     async with init_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await conn.execute(text("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS provider VARCHAR(64);"))
+        await conn.execute(text("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS model VARCHAR(128);"))
     await init_engine.dispose()
 
     yield

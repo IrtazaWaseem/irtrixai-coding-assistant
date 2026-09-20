@@ -59,9 +59,11 @@ async def test_llm_providers_endpoint_returns_safe_metadata():
             assert settings.GROQ_API_KEY not in raw_str
 
 
+@pytest.mark.postgres
+@pytest.mark.integration
 @pytest.mark.asyncio
-async def test_task_creation_with_valid_ollama_selection(tmp_path: Path):
-    """Proves task stores explicit Ollama provider and model."""
+async def test_task_creation_with_valid_ollama_selection(tmp_path: Path, client: AsyncClient):
+    """Proves task stores explicit Ollama provider and model via isolated test DB."""
     ws = tmp_path / "ws_llm_ollama"
     ws.mkdir(parents=True, exist_ok=True)
     init_test_git_repo(ws)
@@ -69,22 +71,20 @@ async def test_task_creation_with_valid_ollama_selection(tmp_path: Path):
     original_base = settings.WORKSPACE_BASE_PATH
     settings.WORKSPACE_BASE_PATH = tmp_path.resolve()
 
-    transport = ASGITransport(app=app)
     try:
-        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
-            res = await client.post(
-                "/api/v1/tasks",
-                json={
-                    "workspace_path": str(ws),
-                    "prompt": "Test Ollama task",
-                    "provider": "ollama",
-                    "model": "deepseek-r1:8b",
-                },
-            )
-            assert res.status_code == 201
-            task = res.json()
-            assert task["provider"] == "ollama"
-            assert task["model"] == "deepseek-r1:8b"
+        res = await client.post(
+            "/api/v1/tasks",
+            json={
+                "workspace_path": str(ws),
+                "prompt": "Test Ollama task",
+                "provider": "ollama",
+                "model": "deepseek-r1:8b",
+            },
+        )
+        assert res.status_code == 201
+        task = res.json()
+        assert task["provider"] == "ollama"
+        assert task["model"] == "deepseek-r1:8b"
     finally:
         settings.WORKSPACE_BASE_PATH = original_base
 

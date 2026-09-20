@@ -104,7 +104,7 @@ jobs:
           TEST_DATABASE_URL: postgresql+asyncpg://postgres:test_secure_password_123@localhost:5432/irtrixai_test
         run: |
           cd backend
-          python -m pytest tests/test_postgres_concurrency.py tests/test_postgres_checkpoint_recovery.py tests/test_task_api.py tests/test_database_isolation.py -v
+          python -m pytest tests/test_postgres_concurrency.py tests/test_postgres_checkpoint_recovery.py tests/test_task_api.py tests/test_database_isolation.py tests/test_task_llm_selection.py -v
 
   job-c-docker-security:
     name: Job C — Real Docker Sandbox Security Tests
