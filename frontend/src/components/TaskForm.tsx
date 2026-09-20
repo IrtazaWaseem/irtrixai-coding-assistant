@@ -1,45 +1,237 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
+import {
+  AlertCircle,
+  FolderPlus,
+  HardDrive,
+  Plus,
+  RotateCw,
+} from "lucide-react";
+import { createWorkspace, getWorkspaces } from "../services/api";
+import { WorkspaceResponse } from "../types";
 
 interface TaskFormProps {
-  onSubmit: (workspacePath: string, prompt: string) => Promise<void>;
+  onSubmit: (workspaceId: string, prompt: string) => Promise<void>;
   isLoading: boolean;
 }
 
 export const TaskForm: React.FC<TaskFormProps> = ({ onSubmit, isLoading }) => {
-  const [workspacePath, setWorkspacePath] = useState(
-    "D:\\irtrixai-coding-assistant\\backend",
-  );
+  const [workspaces, setWorkspaces] = useState<WorkspaceResponse[]>([]);
+  const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string>("");
   const [prompt, setPrompt] = useState("");
+
+  const [isLoadingWorkspaces, setIsLoadingWorkspaces] = useState(true);
+  const [workspaceLoadError, setWorkspaceLoadError] = useState<string | null>(
+    null,
+  );
+
+  // Inline "Add Workspace" state
+  const [showAddForm, setShowAddForm] = useState(false);
+  const [newWsName, setNewWsName] = useState("");
+  const [newWsPath, setNewWsPath] = useState("");
+  const [isRegistering, setIsRegistering] = useState(false);
+  const [addError, setAddError] = useState<string | null>(null);
+
+  const loadWorkspaces = async (autoSelectId?: string) => {
+    setIsLoadingWorkspaces(true);
+    setWorkspaceLoadError(null);
+    try {
+      const list = await getWorkspaces();
+      setWorkspaces(list);
+      if (autoSelectId) {
+        setSelectedWorkspaceId(autoSelectId);
+      } else if (list.length > 0 && !selectedWorkspaceId) {
+        setSelectedWorkspaceId(list[0].id);
+      }
+    } catch (err: any) {
+      setWorkspaceLoadError(
+        err.message || "Failed to load registered workspaces.",
+      );
+    } finally {
+      setIsLoadingWorkspaces(false);
+    }
+  };
+
+  useEffect(() => {
+    loadWorkspaces();
+  }, []);
+
+  const handleRegisterWorkspace = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newWsName.trim() || !newWsPath.trim()) return;
+
+    setIsRegistering(true);
+    setAddError(null);
+    try {
+      const created = await createWorkspace(newWsName.trim(), newWsPath.trim());
+      setNewWsName("");
+      setNewWsPath("");
+      setShowAddForm(false);
+      await loadWorkspaces(created.id);
+    } catch (err: any) {
+      setAddError(err.message || "Workspace registration failed.");
+    } finally {
+      setIsRegistering(false);
+    }
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!workspacePath.trim() || !prompt.trim() || isLoading) return;
-    await onSubmit(workspacePath, prompt);
+    if (!selectedWorkspaceId || !prompt.trim() || isLoading) return;
+    await onSubmit(selectedWorkspaceId, prompt);
   };
 
+  const selectedWorkspace = workspaces.find(
+    (w) => w.id === selectedWorkspaceId,
+  );
+
   return (
-    <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-6 shadow-xl">
-      <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-400 mb-4">
-        New Coding Task
-      </h2>
+    <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-6 shadow-xl space-y-4">
+      <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
+        <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-400">
+          New Coding Task
+        </h2>
+        <button
+          type="button"
+          onClick={() => setShowAddForm(!showAddForm)}
+          className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium text-emerald-400 hover:text-emerald-300 bg-emerald-950/40 hover:bg-emerald-900/50 border border-emerald-800/60 transition-colors"
+        >
+          <Plus className="w-3.5 h-3.5" />
+          <span>Add Workspace</span>
+        </button>
+      </div>
+
+      {/* Inline Registration Sub-form */}
+      {showAddForm && (
+        <form
+          onSubmit={handleRegisterWorkspace}
+          className="p-4 bg-zinc-950/80 border border-zinc-800 rounded-lg space-y-3"
+        >
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-semibold text-zinc-200 flex items-center gap-1.5">
+              <FolderPlus className="w-4 h-4 text-emerald-400" />
+              Register Workspace Directory
+            </span>
+            <button
+              type="button"
+              onClick={() => setShowAddForm(false)}
+              className="text-xs text-zinc-500 hover:text-zinc-300"
+            >
+              Cancel
+            </button>
+          </div>
+
+          {addError && (
+            <div className="p-2.5 bg-rose-950/40 border border-rose-800 rounded text-rose-300 text-xs">
+              {addError}
+            </div>
+          )}
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div>
+              <label className="block text-[11px] font-mono text-zinc-400 mb-1">
+                Workspace Name
+              </label>
+              <input
+                type="text"
+                placeholder="e.g. backend-service"
+                required
+                value={newWsName}
+                onChange={(e) => setNewWsName(e.target.value)}
+                className="w-full px-3 py-1.5 bg-zinc-900 border border-zinc-800 rounded text-xs text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-emerald-500 font-mono"
+              />
+            </div>
+            <div>
+              <label className="block text-[11px] font-mono text-zinc-400 mb-1">
+                Absolute Host Root Path
+              </label>
+              <input
+                type="text"
+                placeholder="e.g. D:\projects\my-app"
+                required
+                value={newWsPath}
+                onChange={(e) => setNewWsPath(e.target.value)}
+                className="w-full px-3 py-1.5 bg-zinc-900 border border-zinc-800 rounded text-xs text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-emerald-500 font-mono"
+              />
+            </div>
+          </div>
+
+          <div className="flex justify-end">
+            <button
+              type="submit"
+              disabled={isRegistering || !newWsName.trim() || !newWsPath.trim()}
+              className="px-3.5 py-1.5 rounded bg-emerald-400 hover:bg-emerald-300 text-emerald-950 text-xs font-semibold disabled:opacity-50 transition-colors"
+            >
+              {isRegistering ? "Registering..." : "Save and Select"}
+            </button>
+          </div>
+        </form>
+      )}
+
+      {/* Main Task Form */}
       <form onSubmit={handleSubmit} className="space-y-4">
         <div>
-          <label
-            htmlFor="workspace-path"
-            className="block text-xs font-medium text-zinc-400 mb-1.5"
-          >
-            Workspace Absolute Path
-          </label>
-          <input
-            id="workspace-path"
-            type="text"
-            required
-            disabled={isLoading}
-            value={workspacePath}
-            onChange={(e) => setWorkspacePath(e.target.value)}
-            placeholder="e.g. D:\projects\my-app"
-            className="w-full px-3.5 py-2 text-sm bg-zinc-950 border border-zinc-800 rounded-lg text-zinc-200 placeholder-zinc-600 focus:outline-none focus:border-indigo-500 font-mono transition-colors disabled:opacity-50"
-          />
+          <div className="flex items-center justify-between mb-1.5">
+            <label
+              htmlFor="workspace-select"
+              className="block text-xs font-medium text-zinc-400"
+            >
+              Registered Workspace
+            </label>
+            {workspaceLoadError && (
+              <button
+                type="button"
+                onClick={() => loadWorkspaces()}
+                className="text-[11px] text-amber-400 hover:text-amber-300 flex items-center gap-1"
+              >
+                <RotateCw className="w-3 h-3" /> Retry
+              </button>
+            )}
+          </div>
+
+          {isLoadingWorkspaces ? (
+            <div className="w-full px-3.5 py-2 text-xs bg-zinc-950 border border-zinc-800 rounded-lg text-zinc-500 font-mono flex items-center gap-2">
+              <RotateCw className="w-3.5 h-3.5 animate-spin text-cyan-400" />
+              Loading workspaces...
+            </div>
+          ) : workspaces.length === 0 ? (
+            <div className="p-3 bg-zinc-950/60 border border-amber-900/40 rounded-lg text-xs text-amber-400/90 flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 shrink-0" />
+              <span>
+                No registered workspaces found. Use "+ Add Workspace" above to
+                register one.
+              </span>
+            </div>
+          ) : (
+            <div className="space-y-1.5">
+              <div className="relative">
+                <select
+                  id="workspace-select"
+                  disabled={isLoading}
+                  value={selectedWorkspaceId}
+                  onChange={(e) => setSelectedWorkspaceId(e.target.value)}
+                  className="w-full px-3.5 py-2 text-sm bg-zinc-950 border border-zinc-800 rounded-lg text-zinc-200 focus:outline-none focus:border-indigo-500 font-mono transition-colors disabled:opacity-50 appearance-none pr-8 cursor-pointer"
+                >
+                  {workspaces.map((ws) => (
+                    <option key={ws.id} value={ws.id}>
+                      {ws.name} ({ws.root_path})
+                    </option>
+                  ))}
+                </select>
+                <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-2.5 text-zinc-500">
+                  ▼
+                </div>
+              </div>
+
+              {selectedWorkspace && (
+                <div className="flex items-center gap-1.5 text-[11px] font-mono text-zinc-500 px-1 truncate">
+                  <HardDrive className="w-3 h-3 text-cyan-400 shrink-0" />
+                  <span className="truncate">
+                    {selectedWorkspace.root_path}
+                  </span>
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
         <div>
@@ -64,31 +256,12 @@ export const TaskForm: React.FC<TaskFormProps> = ({ onSubmit, isLoading }) => {
         <div className="flex justify-end pt-2">
           <button
             type="submit"
-            disabled={isLoading || !workspacePath.trim() || !prompt.trim()}
+            disabled={isLoading || !selectedWorkspaceId || !prompt.trim()}
             className="px-5 py-2 text-sm font-medium rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-lg shadow-indigo-600/20 flex items-center space-x-2"
           >
             {isLoading ? (
               <>
-                <svg
-                  className="animate-spin h-4 w-4 text-white"
-                  xmlns="http://www.w3.org/2000/svg"
-                  fill="none"
-                  viewBox="0 0 24 24"
-                >
-                  <circle
-                    className="opacity-25"
-                    cx="12"
-                    cy="12"
-                    r="10"
-                    stroke="currentColor"
-                    strokeWidth="4"
-                  />
-                  <path
-                    className="opacity-75"
-                    fill="currentColor"
-                    d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
-                  />
-                </svg>
+                <RotateCw className="animate-spin h-4 w-4 text-white" />
                 <span>Initializing Agent...</span>
               </>
             ) : (

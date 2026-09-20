@@ -44,7 +44,10 @@ async def create_task(
     db: AsyncSession = Depends(get_db),
 ) -> TaskResponse:
     task = await TaskService.create_task(
-        db, workspace_path=payload.workspace_path, prompt=payload.prompt
+        db,
+        prompt=payload.prompt,
+        workspace_id=payload.workspace_id,
+        workspace_path=payload.workspace_path,
     )
     return TaskResponse.from_task(task)
 

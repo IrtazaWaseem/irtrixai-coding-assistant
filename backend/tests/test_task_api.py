@@ -1254,3 +1254,88 @@ async def test_concurrent_different_tasks_same_workspace_run_protection(tmp_path
         app.dependency_overrides.clear()
         settings.WORKSPACE_BASE_PATH = original_base
         set_llm_gateway(None)
+
+
+@pytest.mark.asyncio
+async def test_create_task_with_valid_workspace_id(tmp_path: Path):
+    """Phase 13A-4: Proves task can be created via registered workspace_id."""
+    ws = tmp_path / "ws_by_id"
+    ws.mkdir(parents=True, exist_ok=True)
+    init_test_git_repo(ws)
+
+    original_base = settings.WORKSPACE_BASE_PATH
+    settings.WORKSPACE_BASE_PATH = tmp_path.resolve()
+
+    transport = ASGITransport(app=app)
+    try:
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            # 1. Register workspace
+            reg_res = await client.post(
+                "/api/v1/workspaces",
+                json={"name": "test-ws-by-id", "root_path": str(ws)},
+            )
+            assert reg_res.status_code == 201
+            ws_id = reg_res.json()["id"]
+
+            # 2. Create task using workspace_id
+            task_res = await client.post(
+                "/api/v1/tasks",
+                json={"workspace_id": ws_id, "prompt": "Implement ID flow"},
+            )
+            assert task_res.status_code == 201
+            data = task_res.json()
+            assert data["workspace_path"] == str(ws)
+            assert data["prompt"] == "Implement ID flow"
+    finally:
+        settings.WORKSPACE_BASE_PATH = original_base
+
+
+@pytest.mark.asyncio
+async def test_create_task_with_nonexistent_workspace_id_rejected():
+    """Phase 13A-4: Proves nonexistent workspace_id returns 404."""
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        res = await client.post(
+            "/api/v1/tasks",
+            json={
+                "workspace_id": "00000000-0000-0000-0000-000000000000",
+                "prompt": "Test missing",
+            },
+        )
+        assert res.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_client_path_cannot_override_registered_workspace_id(tmp_path: Path):
+    """Phase 13A-4: Proves backend authoritatively uses registered root_path when workspace_id is given."""
+    ws_real = tmp_path / "ws_authoritative"
+    ws_real.mkdir(parents=True, exist_ok=True)
+    init_test_git_repo(ws_real)
+
+    original_base = settings.WORKSPACE_BASE_PATH
+    settings.WORKSPACE_BASE_PATH = tmp_path.resolve()
+
+    transport = ASGITransport(app=app)
+    try:
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            reg_res = await client.post(
+                "/api/v1/workspaces",
+                json={"name": "auth-ws", "root_path": str(ws_real)},
+            )
+            assert reg_res.status_code == 201
+            ws_id = reg_res.json()["id"]
+
+            # Client attempts to pass a different path alongside the valid workspace_id
+            task_res = await client.post(
+                "/api/v1/tasks",
+                json={
+                    "workspace_id": ws_id,
+                    "workspace_path": "C:\\some\\fake\\path",
+                    "prompt": "Test override attempt",
+                },
+            )
+            assert task_res.status_code == 201
+            # Must remain equal to the registered workspace root path from the database
+            assert task_res.json()["workspace_path"] == str(ws_real)
+    finally:
+        settings.WORKSPACE_BASE_PATH = original_base

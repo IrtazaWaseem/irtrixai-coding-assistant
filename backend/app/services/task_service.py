@@ -18,20 +18,54 @@ logger = logging.getLogger(__name__)
 
 class TaskService:
     @staticmethod
-    async def create_task(db: AsyncSession, workspace_path: str, prompt: str) -> Task:
-        resolved_path = validate_workspace_dir(workspace_path)
+    async def create_task(
+        db: AsyncSession,
+        prompt: str,
+        workspace_id: str | uuid.UUID | None = None,
+        workspace_path: str | None = None,
+    ) -> Task:
+        ws: Workspace | None = None
 
-        query = select(Workspace).where(Workspace.root_path == str(resolved_path))
-        result = await db.execute(query)
-        ws = result.scalar_one_or_none()
-        if not ws:
-            ws = Workspace(
-                id=uuid.uuid4(),
-                name=Path(resolved_path).name,
-                root_path=str(resolved_path),
+        if workspace_id:
+            try:
+                ws_uuid = uuid.UUID(workspace_id) if isinstance(workspace_id, str) else workspace_id
+            except (ValueError, AttributeError) as err:
+                raise AppException(
+                    status_code=404,
+                    message=f"Workspace '{workspace_id}' not found.",
+                ) from err
+
+            ws_query = select(Workspace).where(Workspace.id == ws_uuid)
+            ws_result = await db.execute(ws_query)
+            ws = ws_result.scalar_one_or_none()
+            if not ws:
+                raise AppException(
+                    status_code=404,
+                    message=f"Workspace '{workspace_id}' not found.",
+                )
+
+            # Validate the registered workspace path authoritatively from the DB record
+            validate_workspace_dir(ws.root_path)
+
+        elif workspace_path:
+            # Backward-compatible path: resolve directory and get or create workspace
+            resolved_path = validate_workspace_dir(workspace_path)
+            query = select(Workspace).where(Workspace.root_path == str(resolved_path))
+            result = await db.execute(query)
+            ws = result.scalar_one_or_none()
+            if not ws:
+                ws = Workspace(
+                    id=uuid.uuid4(),
+                    name=Path(resolved_path).name,
+                    root_path=str(resolved_path),
+                )
+                db.add(ws)
+                await db.flush()
+        else:
+            raise AppException(
+                status_code=400,
+                message="Either 'workspace_id' or 'workspace_path' must be provided.",
             )
-            db.add(ws)
-            await db.flush()
 
         task_id = uuid.uuid4()
         task = Task(

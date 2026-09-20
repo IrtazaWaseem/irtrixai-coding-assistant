@@ -1,16 +1,27 @@
+import uuid
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class TaskCreate(BaseModel):
-    workspace_path: str = Field(
-        ..., min_length=1, max_length=1024, description="Path to task workspace"
+    workspace_id: uuid.UUID | str | None = Field(
+        default=None, description="UUID of registered workspace"
     )
-    prompt: str = Field(
-        ..., min_length=1, max_length=10000, description="Task instructions/prompt"
+    workspace_path: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=1024,
+        description="Filesystem path to task workspace (legacy fallback)",
     )
+    prompt: str = Field(..., min_length=1, max_length=10000, description="Task instructions/prompt")
+
+    @model_validator(mode="after")
+    def check_workspace_identifier(self) -> "TaskCreate":
+        if not self.workspace_id and not self.workspace_path:
+            raise ValueError("Either 'workspace_id' or 'workspace_path' must be provided.")
+        return self
 
 
 class TaskResponse(BaseModel):

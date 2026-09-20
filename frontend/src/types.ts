@@ -108,3 +108,8 @@ export interface LLMInfoResponse {
   models?: string[];
   fallback_provider?: string | null;
 }
+export interface TaskCreatePayload {
+  workspace_id?: string;
+  workspace_path?: string;
+  prompt: string;
+}

@@ -40,16 +40,22 @@ async function handleResponse<T>(res: Response): Promise<T> {
 // ==================== Task API ====================
 
 export async function createTask(
-  workspacePath: string,
+  workspaceIdOrPath: string,
   prompt: string,
 ): Promise<TaskResponse> {
+  const isUuid =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+      workspaceIdOrPath,
+    );
+
+  const payload = isUuid
+    ? { workspace_id: workspaceIdOrPath, prompt }
+    : { workspace_path: workspaceIdOrPath, prompt };
+
   const res = await fetch(`${API_BASE}/api/v1/tasks`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      workspace_path: workspacePath.trim(),
-      prompt: prompt.trim(),
-    }),
+    body: JSON.stringify(payload),
   });
   return handleResponse<TaskResponse>(res);
 }
