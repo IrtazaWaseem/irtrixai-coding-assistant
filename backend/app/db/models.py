@@ -57,6 +57,8 @@ class Task(Base, TimestampMixin):
         index=True,
     )
     prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    provider: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    model: Mapped[str | None] = mapped_column(String(128), nullable=True)
     status: Mapped[TaskStatus] = mapped_column(
         Enum(TaskStatus, name="task_status", native_enum=True),
         default=TaskStatus.PENDING,

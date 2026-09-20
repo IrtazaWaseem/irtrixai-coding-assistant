@@ -91,11 +91,33 @@ def set_llm_gateway(gateway: LLMGateway | None) -> None:
     _llm_gateway = gateway
 
 
-def _resolve_gateway(config: RunnableConfig | None) -> LLMGateway:
+def _resolve_gateway(
+    config: RunnableConfig | None = None,
+    state: AgentState | None = None,
+) -> LLMGateway:
+    # 1. Config-scoped mock passed directly to node (e.g. test_agent_graph.py)
     if config and isinstance(config, dict):
         configurable = config.get("configurable", {})
         if "llm_gateway" in configurable and configurable["llm_gateway"] is not None:
             return configurable["llm_gateway"]
+
+    # 2. Test-injected mock gateway (e.g. test_task_api.py via set_llm_gateway)
+    if _llm_gateway is not None:
+        return _llm_gateway
+
+    # 3. Production runtime: Task-scoped provider/model from checkpointed state
+    if state and isinstance(state, dict):
+        prov = state.get("provider")
+        mod = state.get("model")
+        if prov and mod:
+            try:
+                from app.services.llm.gateway import create_task_llm_gateway
+
+                return create_task_llm_gateway(prov, mod)
+            except Exception as err:
+                logger.debug("Failed to resolve task gateway from state: %s", err)
+
+    # 4. Global default gateway fallback
     return get_llm_gateway()
 
 
@@ -436,9 +458,8 @@ async def repository_context(
 
 
 async def planner(state: AgentState, config: RunnableConfig | None = None) -> dict[str, Any]:
-    """Generates execution plan using LLMGateway structured output enriched with repository context and minimal patch discipline."""
     logger.info("Node [planner] generating execution plan via LLMGateway.")
-    gateway = _resolve_gateway(config)
+    gateway = _resolve_gateway(config, state)
 
     user_prompt = _extract_user_prompt(state)
     workspace_summary = state.get("workspace_summary") or "Incomplete / uninspected workspace."
@@ -502,9 +523,8 @@ async def planner(state: AgentState, config: RunnableConfig | None = None) -> di
 
 
 async def coder(state: AgentState, config: RunnableConfig | None = None) -> dict[str, Any]:
-    """Generates code modification proposals using LLMGateway structured output, respecting minimal patch discipline."""
     logger.info("Node [coder] generating code proposal via LLMGateway.")
-    gateway = _resolve_gateway(config)
+    gateway = _resolve_gateway(config, state)
 
     plan = state.get("plan")
     user_prompt = _extract_user_prompt(state)
@@ -842,7 +862,7 @@ async def debugger(state: AgentState, config: RunnableConfig | None = None) -> d
         )
         current_repairs = MAX_REPAIR_ITERATIONS
 
-    gateway = _resolve_gateway(config)
+    gateway = _resolve_gateway(config, state)
 
     test_output = str(test_res.get("output") or "Unknown failure output")
     coder_prop = state.get("coder_proposal")
@@ -887,7 +907,7 @@ async def debugger(state: AgentState, config: RunnableConfig | None = None) -> d
 
 async def reviewer(state: AgentState, config: RunnableConfig | None = None) -> dict[str, Any]:
     logger.info("Node [reviewer] auditing implementation via LLMGateway.")
-    gateway = _resolve_gateway(config)
+    gateway = _resolve_gateway(config, state)
 
     test_res = state.get("test_result")
     test_passed = isinstance(test_res, dict) and test_res.get("success") is True

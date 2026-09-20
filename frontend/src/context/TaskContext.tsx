@@ -33,7 +33,12 @@ export interface TaskContextType {
   isLoading: boolean;
   isSubmittingApproval: boolean;
   connectionState: "connected" | "reconnecting" | "disconnected" | "idle";
-  handleStartTask: (wsPath: string, userPrompt: string) => Promise<void>;
+  handleStartTask: (
+    wsPath: string,
+    userPrompt: string,
+    provider?: string,
+    model?: string,
+  ) => Promise<void>;
   handleApprove: () => Promise<void>;
   handleReject: (feedbackText: string) => Promise<void>;
   handleReset: () => void;
@@ -356,7 +361,12 @@ export const TaskProvider: React.FC<{ children: React.ReactNode }> = ({
     };
   }, [connectSSE, addEvent, cleanupSSE]);
 
-  const handleStartTask = async (wsPath: string, userPrompt: string) => {
+  const handleStartTask = async (
+    wsPath: string,
+    userPrompt: string,
+    provider?: string,
+    model?: string,
+  ) => {
     setIsLoading(true);
     setError(null);
     seenEventKeysRef.current.clear();
@@ -368,14 +378,14 @@ export const TaskProvider: React.FC<{ children: React.ReactNode }> = ({
     cleanupSSE();
 
     try {
-      const created = await createTask(wsPath, userPrompt);
+      const created = await createTask(wsPath, userPrompt, provider, model);
       setTaskId(created.id);
       setStatus("running");
       localStorage.setItem("irtrixai_active_task_id", created.id);
 
       addEvent(
         "task_created",
-        `Task created: ${created.id.slice(0, 8)}`,
+        `Task created: ${created.id.slice(0, 8)} (${created.provider || "default"} / ${created.model || "default"})`,
         undefined,
         "info",
       );

@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agent.graph import get_production_graph
 from app.agent.nodes import sanitize_error_message
 from app.agent.state import create_initial_state
+from app.core.config import settings
 from app.core.exceptions import AppException
 from app.db.models import TaskStatus
 from app.db.session import get_db
@@ -48,6 +49,8 @@ async def create_task(
         prompt=payload.prompt,
         workspace_id=payload.workspace_id,
         workspace_path=payload.workspace_path,
+        provider=payload.provider,
+        model=payload.model,
     )
     return TaskResponse.from_task(task)
 
@@ -80,7 +83,11 @@ async def run_task(
         )
 
     task, should_execute = await TaskService.prepare_task_for_run(db, task_id, graph)
-    config = {"configurable": {"thread_id": task.thread_id}}
+
+    task_prov = getattr(task, "provider", None) or settings.PRIMARY_LLM_PROVIDER
+    task_model = getattr(task, "model", None) or settings.get_provider_default_model(task_prov)
+
+    config: dict[str, Any] = {"configurable": {"thread_id": task.thread_id}}
 
     if not should_execute:
         st = str(getattr(task, "status", "")).lower()
@@ -134,6 +141,8 @@ async def run_task(
                 workspace_path=task.workspace_path,
                 thread_id=task.thread_id,
                 prompt=task.prompt,
+                provider=task_prov,
+                model=task_model,
             )
             await graph.ainvoke(initial_state, config=config)
         else:
@@ -194,8 +203,7 @@ async def submit_approval(
     graph=Depends(get_agent_graph),
 ) -> ExecutionResponse:
     task = await TaskService.prepare_task_for_approval(db, task_id)
-    config = {"configurable": {"thread_id": task.thread_id}}
-    # ... remaining execution proceeds normally
+    config: dict[str, Any] = {"configurable": {"thread_id": task.thread_id}}
 
     try:
         if graph is None:
@@ -283,7 +291,7 @@ async def stream_task_events(
                 {
                     "task_id": str(task.id),
                     "status": "pending",
-                    "message": ("Task has not been started. Trigger execution via POST /run."),
+                    "message": "Task has not been started. Trigger execution via POST /run.",
                 },
             )
 

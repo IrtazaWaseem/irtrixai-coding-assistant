@@ -1,16 +1,22 @@
 import React, { useEffect, useState } from "react";
 import {
   AlertCircle,
+  Cpu,
   FolderPlus,
   HardDrive,
   Plus,
   RotateCw,
 } from "lucide-react";
-import { createWorkspace, getWorkspaces } from "../services/api";
-import { WorkspaceResponse } from "../types";
+import { createWorkspace, getProviders, getWorkspaces } from "../services/api";
+import { ProviderOption, WorkspaceResponse } from "../types";
 
 interface TaskFormProps {
-  onSubmit: (workspaceId: string, prompt: string) => Promise<void>;
+  onSubmit: (
+    workspaceId: string,
+    prompt: string,
+    provider?: string,
+    model?: string,
+  ) => Promise<void>;
   isLoading: boolean;
 }
 
@@ -18,6 +24,12 @@ export const TaskForm: React.FC<TaskFormProps> = ({ onSubmit, isLoading }) => {
   const [workspaces, setWorkspaces] = useState<WorkspaceResponse[]>([]);
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string>("");
   const [prompt, setPrompt] = useState("");
+
+  // Provider & Model State
+  const [providers, setProviders] = useState<ProviderOption[]>([]);
+  const [selectedProviderId, setSelectedProviderId] = useState<string>("");
+  const [selectedModel, setSelectedModel] = useState<string>("");
+  const [isLoadingProviders, setIsLoadingProviders] = useState(true);
 
   const [isLoadingWorkspaces, setIsLoadingWorkspaces] = useState(true);
   const [workspaceLoadError, setWorkspaceLoadError] = useState<string | null>(
@@ -31,28 +43,42 @@ export const TaskForm: React.FC<TaskFormProps> = ({ onSubmit, isLoading }) => {
   const [isRegistering, setIsRegistering] = useState(false);
   const [addError, setAddError] = useState<string | null>(null);
 
-  const loadWorkspaces = async (autoSelectId?: string) => {
+  const loadData = async () => {
     setIsLoadingWorkspaces(true);
+    setIsLoadingProviders(true);
     setWorkspaceLoadError(null);
+
     try {
-      const list = await getWorkspaces();
-      setWorkspaces(list);
-      if (autoSelectId) {
-        setSelectedWorkspaceId(autoSelectId);
-      } else if (list.length > 0 && !selectedWorkspaceId) {
-        setSelectedWorkspaceId(list[0].id);
+      const [wsList, provData] = await Promise.all([
+        getWorkspaces(),
+        getProviders(),
+      ]);
+
+      setWorkspaces(wsList);
+      if (wsList.length > 0) {
+        setSelectedWorkspaceId(wsList[0].id);
+      }
+
+      setProviders(provData.providers);
+      const defaultProv =
+        provData.providers.find((p) => p.id === provData.default_provider) ||
+        provData.providers.find((p) => p.available) ||
+        provData.providers[0];
+
+      if (defaultProv) {
+        setSelectedProviderId(defaultProv.id);
+        setSelectedModel(defaultProv.default_model);
       }
     } catch (err: any) {
-      setWorkspaceLoadError(
-        err.message || "Failed to load registered workspaces.",
-      );
+      setWorkspaceLoadError(err.message || "Failed to load initial data.");
     } finally {
       setIsLoadingWorkspaces(false);
+      setIsLoadingProviders(false);
     }
   };
 
   useEffect(() => {
-    loadWorkspaces();
+    loadData();
   }, []);
 
   const handleRegisterWorkspace = async (e: React.FormEvent) => {
@@ -66,7 +92,9 @@ export const TaskForm: React.FC<TaskFormProps> = ({ onSubmit, isLoading }) => {
       setNewWsName("");
       setNewWsPath("");
       setShowAddForm(false);
-      await loadWorkspaces(created.id);
+      const updatedList = await getWorkspaces();
+      setWorkspaces(updatedList);
+      setSelectedWorkspaceId(created.id);
     } catch (err: any) {
       setAddError(err.message || "Workspace registration failed.");
     } finally {
@@ -74,10 +102,27 @@ export const TaskForm: React.FC<TaskFormProps> = ({ onSubmit, isLoading }) => {
     }
   };
 
+  const selectedProviderObj = providers.find(
+    (p) => p.id === selectedProviderId,
+  );
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedWorkspaceId || !prompt.trim() || isLoading) return;
-    await onSubmit(selectedWorkspaceId, prompt);
+    if (
+      !selectedWorkspaceId ||
+      !prompt.trim() ||
+      !selectedProviderObj?.available ||
+      !selectedModel.trim() ||
+      isLoading
+    ) {
+      return;
+    }
+    await onSubmit(
+      selectedWorkspaceId,
+      prompt,
+      selectedProviderId,
+      selectedModel,
+    );
   };
 
   const selectedWorkspace = workspaces.find(
@@ -169,6 +214,91 @@ export const TaskForm: React.FC<TaskFormProps> = ({ onSubmit, isLoading }) => {
 
       {/* Main Task Form */}
       <form onSubmit={handleSubmit} className="space-y-4">
+        {/* Runtime LLM Provider & Model Selection */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <div>
+            <label
+              htmlFor="provider-select"
+              className="block text-xs font-medium text-zinc-400 mb-1.5"
+            >
+              LLM Provider
+            </label>
+            <div className="relative">
+              <select
+                id="provider-select"
+                disabled={isLoading || isLoadingProviders}
+                value={selectedProviderId}
+                onChange={(e) => {
+                  const newProvId = e.target.value;
+                  setSelectedProviderId(newProvId);
+                  const found = providers.find((p) => p.id === newProvId);
+                  if (found) {
+                    setSelectedModel(found.default_model);
+                  }
+                }}
+                className="w-full px-3.5 py-2 text-sm bg-zinc-950 border border-zinc-800 rounded-lg text-zinc-200 focus:outline-none focus:border-indigo-500 font-mono transition-colors disabled:opacity-50 appearance-none pr-8 cursor-pointer"
+              >
+                {providers.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}{" "}
+                    {!p.available
+                      ? `(Unavailable — ${p.reason || "Not configured"})`
+                      : ""}
+                  </option>
+                ))}
+              </select>
+              <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-2.5 text-zinc-500">
+                ▼
+              </div>
+            </div>
+
+            {selectedProviderObj && !selectedProviderObj.available && (
+              <div className="mt-1 flex items-center gap-1.5 text-[11px] font-mono text-amber-400/90">
+                <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                <span>Unavailable: {selectedProviderObj.reason}</span>
+              </div>
+            )}
+          </div>
+
+          <div>
+            <label
+              htmlFor="model-select"
+              className="block text-xs font-medium text-zinc-400 mb-1.5"
+            >
+              Model Identifier
+            </label>
+            <div className="relative">
+              <select
+                id="model-select"
+                disabled={
+                  isLoading ||
+                  isLoadingProviders ||
+                  !selectedProviderObj?.available
+                }
+                value={selectedModel}
+                onChange={(e) => setSelectedModel(e.target.value)}
+                className="w-full px-3.5 py-2 text-sm bg-zinc-950 border border-zinc-800 rounded-lg text-zinc-200 focus:outline-none focus:border-indigo-500 font-mono transition-colors disabled:opacity-50 appearance-none pr-8 cursor-pointer"
+              >
+                {selectedProviderObj?.models.map((m) => (
+                  <option key={m} value={m}>
+                    {m}
+                  </option>
+                ))}
+              </select>
+              <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-2.5 text-zinc-500">
+                ▼
+              </div>
+            </div>
+            {selectedModel && (
+              <div className="flex items-center gap-1 text-[11px] font-mono text-zinc-500 mt-1 px-1">
+                <Cpu className="w-3 h-3 text-cyan-400 shrink-0" />
+                <span className="truncate">Active model: {selectedModel}</span>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Workspace Selector */}
         <div>
           <div className="flex items-center justify-between mb-1.5">
             <label
@@ -180,7 +310,7 @@ export const TaskForm: React.FC<TaskFormProps> = ({ onSubmit, isLoading }) => {
             {workspaceLoadError && (
               <button
                 type="button"
-                onClick={() => loadWorkspaces()}
+                onClick={() => loadData()}
                 className="text-[11px] text-amber-400 hover:text-amber-300 flex items-center gap-1"
               >
                 <RotateCw className="w-3 h-3" /> Retry
@@ -234,6 +364,7 @@ export const TaskForm: React.FC<TaskFormProps> = ({ onSubmit, isLoading }) => {
           )}
         </div>
 
+        {/* Task Prompt */}
         <div>
           <label
             htmlFor="task-prompt"
@@ -256,7 +387,13 @@ export const TaskForm: React.FC<TaskFormProps> = ({ onSubmit, isLoading }) => {
         <div className="flex justify-end pt-2">
           <button
             type="submit"
-            disabled={isLoading || !selectedWorkspaceId || !prompt.trim()}
+            disabled={
+              isLoading ||
+              !selectedWorkspaceId ||
+              !prompt.trim() ||
+              !selectedProviderObj?.available ||
+              !selectedModel.trim()
+            }
             className="px-5 py-2 text-sm font-medium rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-lg shadow-indigo-600/20 flex items-center space-x-2"
           >
             {isLoading ? (

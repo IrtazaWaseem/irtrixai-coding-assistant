@@ -2,6 +2,7 @@ import {
   ApprovalRequest,
   ExecutionResponse,
   LLMInfoResponse,
+  ProvidersResponse,
   SystemStatusResponse,
   TaskResponse,
   WorkspaceResponse,
@@ -42,15 +43,20 @@ async function handleResponse<T>(res: Response): Promise<T> {
 export async function createTask(
   workspaceIdOrPath: string,
   prompt: string,
+  provider?: string,
+  model?: string,
 ): Promise<TaskResponse> {
   const isUuid =
     /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
       workspaceIdOrPath,
     );
 
-  const payload = isUuid
+  const payload: Record<string, any> = isUuid
     ? { workspace_id: workspaceIdOrPath, prompt }
     : { workspace_path: workspaceIdOrPath, prompt };
+
+  if (provider) payload.provider = provider;
+  if (model) payload.model = model;
 
   const res = await fetch(`${API_BASE}/api/v1/tasks`, {
     method: "POST",
@@ -207,4 +213,12 @@ export async function getLLMInfo(): Promise<LLMInfoResponse> {
     headers: { Accept: "application/json" },
   });
   return handleResponse<LLMInfoResponse>(res);
+}
+
+export async function getProviders(): Promise<ProvidersResponse> {
+  const res = await fetch(`${API_BASE}/api/v1/llm/providers`, {
+    method: "GET",
+    headers: { Accept: "application/json" },
+  });
+  return handleResponse<ProvidersResponse>(res);
 }

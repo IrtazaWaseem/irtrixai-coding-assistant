@@ -23,9 +23,42 @@ class TaskService:
         prompt: str,
         workspace_id: str | uuid.UUID | None = None,
         workspace_path: str | None = None,
+        provider: str | None = None,
+        model: str | None = None,
     ) -> Task:
-        ws: Workspace | None = None
+        from app.core.config import settings
 
+        # 1. Authoritative provider & model resolution and validation
+        prov = (
+            provider.strip().lower()
+            if provider and provider.strip()
+            else settings.PRIMARY_LLM_PROVIDER.strip().lower()
+        )
+        if prov not in ("gemini", "groq", "ollama"):
+            raise AppException(
+                status_code=400,
+                message=f"Unsupported LLM provider '{prov}'. Allowed: 'gemini', 'groq', 'ollama'.",
+            )
+
+        mod = (
+            model.strip() if model and model.strip() else settings.get_provider_default_model(prov)
+        )
+        if not mod:
+            raise AppException(
+                status_code=400,
+                message=f"Model identifier cannot be empty for provider '{prov}'.",
+            )
+
+        # 2. Verify provider credential availability
+        api_key, _ = settings.get_provider_credentials(prov)
+        if prov in ("gemini", "groq") and not (api_key and api_key.strip()):
+            raise AppException(
+                status_code=400,
+                message=f"Provider '{prov}' is unavailable: {prov.capitalize()} API key is not configured.",
+            )
+
+        # 3. Workspace resolution
+        ws: Workspace | None = None
         if workspace_id:
             try:
                 ws_uuid = uuid.UUID(workspace_id) if isinstance(workspace_id, str) else workspace_id
@@ -43,12 +76,9 @@ class TaskService:
                     status_code=404,
                     message=f"Workspace '{workspace_id}' not found.",
                 )
-
-            # Validate the registered workspace path authoritatively from the DB record
             validate_workspace_dir(ws.root_path)
 
         elif workspace_path:
-            # Backward-compatible path: resolve directory and get or create workspace
             resolved_path = validate_workspace_dir(workspace_path)
             query = select(Workspace).where(Workspace.root_path == str(resolved_path))
             result = await db.execute(query)
@@ -72,6 +102,8 @@ class TaskService:
             id=task_id,
             workspace_id=ws.id,
             prompt=prompt.strip(),
+            provider=prov,
+            model=mod,
             status=TaskStatus.PENDING,
         )
         db.add(task)

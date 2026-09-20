@@ -25,6 +25,8 @@ class AgentState(TypedDict):
     task_id: str
     workspace_path: str
     thread_id: str
+    provider: str | None
+    model: str | None
     messages: list[dict[str, Any]]
     workspace_summary: str | None
     tech_stack: list[str]
@@ -51,11 +53,15 @@ def create_initial_state(
     workspace_path: str,
     thread_id: str,
     prompt: str = "",
+    provider: str | None = None,
+    model: str | None = None,
 ) -> AgentState:
     return {
         "task_id": task_id,
         "workspace_path": workspace_path,
         "thread_id": thread_id,
+        "provider": provider,
+        "model": model,
         "messages": [{"role": "user", "content": prompt}] if prompt else [],
         "workspace_summary": None,
         "tech_stack": [],
@@ -94,11 +100,7 @@ def validate_state_invariants(state: AgentState | dict[str, Any]) -> bool:
         raise ValueError("task_id must be non-empty.")
 
     workspace_path = state.get("workspace_path")
-    if (
-        not workspace_path
-        or not isinstance(workspace_path, str)
-        or not workspace_path.strip()
-    ):
+    if not workspace_path or not isinstance(workspace_path, str) or not workspace_path.strip():
         raise ValueError("workspace_path must be non-empty.")
 
     norm_ws = str(workspace_path).replace("\\", "/")
@@ -116,12 +118,8 @@ def validate_state_invariants(state: AgentState | dict[str, Any]) -> bool:
         k_lower = str(k).lower()
         if any(term in k_lower for term in SENSITIVE_KEY_TERMS):
             raise ValueError(f"Security violation: state contains sensitive key '{k}'.")
-        if isinstance(v, str) and any(
-            term in v.lower() for term in ("aizasy", "bearer ")
-        ):
-            raise ValueError(
-                f"Security violation: state contains sensitive secret in '{k}'."
-            )
+        if isinstance(v, str) and any(term in v.lower() for term in ("aizasy", "bearer ")):
+            raise ValueError(f"Security violation: state contains sensitive secret in '{k}'.")
 
     # 3. Repair Count Governance
     repair_count = state.get("repair_count", 0)

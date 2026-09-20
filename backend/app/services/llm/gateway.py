@@ -4,6 +4,8 @@ from collections.abc import AsyncIterator
 from pydantic import BaseModel
 
 from app.core.exceptions import (
+    LLMAuthenticationException,
+    LLMConfigurationException,
     LLMConnectionException,
     LLMProviderUnavailableException,
     LLMRateLimitException,
@@ -11,7 +13,7 @@ from app.core.exceptions import (
     LLMTimeoutException,
     LLMUnsupportedCapabilityException,
 )
-from app.schemas.llm import LLMResponse, LLMStreamChunk, ModelInfo
+from app.schemas.llm import LLMConfig, LLMResponse, LLMStreamChunk, ModelInfo
 from app.services.llm.base import LLMProvider
 from app.services.llm.factory import LLMFactory
 
@@ -233,3 +235,46 @@ class LLMGateway:
                     yield chunk
             else:
                 raise
+
+
+def create_task_llm_gateway(provider: str, model: str) -> LLMGateway:
+    """Builds an isolated, task-scoped LLMGateway without mutating global settings."""
+    from app.core.config import settings
+
+    prov = provider.strip().lower()
+    if prov not in ("gemini", "groq", "ollama"):
+        raise LLMConfigurationException(
+            f"Unsupported LLM provider '{prov}'. Allowed providers are: 'gemini', 'groq', 'ollama'."
+        )
+
+    clean_model = model.strip()
+    if not clean_model:
+        clean_model = settings.get_provider_default_model(prov)
+
+    api_key, base_url = settings.get_provider_credentials(prov)
+    if prov in ("gemini", "groq") and not (api_key and api_key.strip()):
+        raise LLMAuthenticationException(
+            f"Provider '{prov}' is unavailable: {prov.capitalize()} API key is not configured."
+        )
+
+    config = LLMConfig(
+        provider=prov,
+        model=clean_model,
+        api_key=api_key,
+        base_url=base_url,
+        timeout_seconds=settings.LLM_REQUEST_TIMEOUT_SECONDS,
+        max_retries=settings.LLM_MAX_RETRIES,
+        thinking_level=settings.LLM_THINKING_LEVEL,
+    )
+    primary = LLMFactory.create_provider(config)
+
+    fallback = None
+    if settings.FALLBACK_LLM_PROVIDER:
+        fallback_prov = settings.FALLBACK_LLM_PROVIDER.strip().lower()
+        if fallback_prov != prov:
+            try:
+                fallback = LLMFactory.create_fallback_provider()
+            except Exception:
+                fallback = None
+
+    return LLMGateway(primary_provider=primary, fallback_provider=fallback)

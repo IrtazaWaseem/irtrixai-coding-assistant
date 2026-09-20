@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -74,6 +75,12 @@ async def real_postgres_session_factory():
         engine = create_async_engine(async_uri, poolclass=NullPool, echo=False)
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+            await conn.execute(
+                text("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS provider VARCHAR(64);")
+            )
+            await conn.execute(
+                text("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS model VARCHAR(128);")
+            )
     except Exception as exc:
         pytest.fail(f"Test PostgreSQL instance unreachable at {async_uri}. Error: {exc}")
 

@@ -15,6 +15,12 @@ class TaskCreate(BaseModel):
         max_length=1024,
         description="Filesystem path to task workspace (legacy fallback)",
     )
+    provider: str | None = Field(
+        default=None, description="LLM provider: 'gemini', 'groq', or 'ollama'"
+    )
+    model: str | None = Field(
+        default=None, description="Model identifier for the selected provider"
+    )
     prompt: str = Field(..., min_length=1, max_length=10000, description="Task instructions/prompt")
 
     @model_validator(mode="after")
@@ -30,6 +36,8 @@ class TaskResponse(BaseModel):
     prompt: str
     thread_id: str
     status: str
+    provider: str | None = None
+    model: str | None = None
     error: str | None = None
     created_at: datetime
     updated_at: datetime
@@ -62,6 +70,8 @@ class TaskResponse(BaseModel):
             prompt=task.prompt,
             thread_id=t_id,
             status=st,
+            provider=getattr(task, "provider", None),
+            model=getattr(task, "model", None),
             error=error,
             created_at=task.created_at,
             updated_at=task.updated_at,

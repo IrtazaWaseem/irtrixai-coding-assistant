@@ -1,20 +1,3 @@
-export interface TaskResponse {
-  id: string;
-  workspace_id?: string;
-  prompt?: string;
-  status: string;
-  created_at?: string;
-  updated_at?: string;
-  interrupt_payload?: {
-    pending_patch?: string;
-    coder_summary?: string;
-    [key: string]: any;
-  };
-  test_result?: any;
-  final_result?: any;
-  review_summary?: any;
-}
-
 export interface ExecutionResponse {
   task_id: string;
   status: string;
@@ -108,8 +91,45 @@ export interface LLMInfoResponse {
   models?: string[];
   fallback_provider?: string | null;
 }
+export interface ProviderOption {
+  id: string;
+  name: string;
+  available: boolean;
+  reason?: string | null;
+  default_model: string;
+  models: string[];
+}
+
+export interface ProvidersResponse {
+  providers: ProviderOption[];
+  default_provider: string;
+  default_model: string;
+}
+
 export interface TaskCreatePayload {
   workspace_id?: string;
   workspace_path?: string;
+  provider?: string;
+  model?: string;
   prompt: string;
+}
+
+export interface TaskResponse {
+  id: string;
+  workspace_path?: string;
+  prompt?: string;
+  thread_id?: string;
+  provider?: string;
+  model?: string;
+  status: string;
+  created_at?: string;
+  updated_at?: string;
+  interrupt_payload?: {
+    pending_patch?: string;
+    coder_summary?: string;
+    [key: string]: any;
+  };
+  test_result?: any;
+  final_result?: any;
+  review_summary?: any;
 }
