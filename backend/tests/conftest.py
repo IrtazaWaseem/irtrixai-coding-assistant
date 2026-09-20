@@ -47,6 +47,14 @@ if _initial_test_url:
     _parsed = make_url(_initial_test_url)
     if _parsed.database:
         settings.POSTGRES_DB = _parsed.database
+    if _parsed.username:
+        settings.POSTGRES_USER = _parsed.username
+    if _parsed.password:
+        settings.POSTGRES_PASSWORD = _parsed.password
+    if _parsed.host:
+        settings.POSTGRES_SERVER = _parsed.host
+    if _parsed.port:
+        settings.POSTGRES_PORT = _parsed.port
 
     session_module.engine = create_async_engine(
         _initial_test_url,
@@ -79,24 +87,32 @@ async def ensure_test_database_exists(test_db_url: str) -> None:
         )
         await conn.close()
     except asyncpg.InvalidCatalogNameError:
-        sys_conn = await asyncpg.connect(
-            user=parsed.username,
-            password=parsed.password,
-            host=parsed.host,
-            port=parsed.port or 5432,
-            database="postgres",
-        )
-        try:
-            await sys_conn.execute(f'CREATE DATABASE "{db_name}"')
-        finally:
-            await sys_conn.close()
+        sys_conn = None
+        for maint_db in ("postgres", "template1", "irtrixai_db"):
+            try:
+                sys_conn = await asyncpg.connect(
+                    user=parsed.username,
+                    password=parsed.password,
+                    host=parsed.host,
+                    port=parsed.port or 5432,
+                    database=maint_db,
+                )
+                break
+            except Exception:
+                continue
+
+        if sys_conn:
+            try:
+                await sys_conn.execute(f'CREATE DATABASE "{db_name}"')
+            finally:
+                await sys_conn.close()
 
 
 @pytest_asyncio.fixture(scope="session", autouse=True)
 async def setup_test_database():
     """
     Session-level fixture to create schema in test database once.
-    Uses NullPool so no open connections are leaked into subsequent loops.
+    Uses NullPool so no open connections are leaked across async loops.
     """
     test_url = settings.TEST_DATABASE_URL or os.environ.get("TEST_DATABASE_URL")
     if not test_url:

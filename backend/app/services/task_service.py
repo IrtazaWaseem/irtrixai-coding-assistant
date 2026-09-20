@@ -114,10 +114,6 @@ class TaskService:
                 message=f"Task '{task_id}' not found.",
             )
 
-        # Reconcile if marked RUNNING in DB
-        if task.status == TaskStatus.RUNNING and graph is not None:
-            task = await TaskService.reconcile_task_status(db, task, graph)
-
         if task.status == TaskStatus.RUNNING:
             raise AppException(
                 status_code=409,
@@ -132,7 +128,7 @@ class TaskService:
             await db.commit()
             return task, False
 
-        # Transition PENDING -> RUNNING atomically
+        # Transition PENDING -> RUNNING atomically under the lock
         task.status = TaskStatus.RUNNING
         if task.runs and len(task.runs) > 0:
             task.runs[-1].status = TaskStatus.RUNNING
@@ -145,7 +141,7 @@ class TaskService:
 
     @staticmethod
     async def prepare_task_for_approval(db: AsyncSession, task_id: str) -> Task:
-        """Fix #1: Atomically locks task row with FOR UPDATE and verifies task is AWAITING_APPROVAL."""
+        """Atomically locks task row with FOR UPDATE and verifies task is AWAITING_APPROVAL."""
         try:
             task_uuid = uuid.UUID(task_id) if isinstance(task_id, str) else task_id
         except (ValueError, AttributeError) as err:
@@ -168,12 +164,6 @@ class TaskService:
                 message=f"Task '{task_id}' not found.",
             )
 
-        if task.status == TaskStatus.RUNNING:
-            raise AppException(
-                status_code=409,
-                message=f"Task '{task_id}' is currently running.",
-            )
-
         if task.status != TaskStatus.AWAITING_APPROVAL:
             raise AppException(
                 status_code=400,
@@ -189,6 +179,45 @@ class TaskService:
         return await TaskService.get_task(db, str(task.id))
 
     lock_task_for_approval = prepare_task_for_approval
+
+    @staticmethod
+    async def prepare_task_for_approval(db: AsyncSession, task_id: str) -> Task:
+        """Atomically locks task row with FOR UPDATE and verifies task is AWAITING_APPROVAL."""
+        try:
+            task_uuid = uuid.UUID(task_id) if isinstance(task_id, str) else task_id
+        except (ValueError, AttributeError) as err:
+            raise AppException(
+                status_code=404,
+                message=f"Task '{task_id}' not found.",
+            ) from err
+
+        query = (
+            select(Task)
+            .options(selectinload(Task.workspace), selectinload(Task.runs))
+            .where(Task.id == task_uuid)
+            .with_for_update()
+        )
+        result = await db.execute(query)
+        task = result.scalar_one_or_none()
+        if not task:
+            raise AppException(
+                status_code=404,
+                message=f"Task '{task_id}' not found.",
+            )
+
+        if task.status != TaskStatus.AWAITING_APPROVAL:
+            raise AppException(
+                status_code=400,
+                message=f"Task '{task_id}' is not currently awaiting human approval.",
+            )
+
+        task.status = TaskStatus.RUNNING
+        if task.runs and len(task.runs) > 0:
+            task.runs[-1].status = TaskStatus.RUNNING
+        db.add(task)
+        await db.commit()
+
+        return await TaskService.get_task(db, str(task.id))
 
     @staticmethod
     async def reconcile_task_status(db: AsyncSession, task: Task, graph: Any = None) -> Task:
