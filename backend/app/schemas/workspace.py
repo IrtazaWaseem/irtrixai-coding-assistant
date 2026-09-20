@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import uuid
 from datetime import datetime
 
@@ -9,7 +11,7 @@ class FileTreeNode(BaseModel):
     path: str
     type: str  # "file" | "directory"
     size: int | None = None
-    children: list["FileTreeNode"] | None = None
+    children: list[FileTreeNode] | None = None
 
 
 # Backward-compatible alias
