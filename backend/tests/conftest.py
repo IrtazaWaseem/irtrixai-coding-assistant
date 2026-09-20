@@ -98,7 +98,7 @@ async def ensure_test_database_exists(test_db_url: str) -> None:
                     database=maint_db,
                 )
                 break
-            except Exception:
+            except (asyncpg.PostgresError, OSError):
                 continue
 
         if sys_conn:
@@ -135,15 +135,15 @@ async def setup_test_database():
 @pytest.fixture(autouse=True)
 def guard_database_url_in_tests(request):
     """
-    Guarantees that any test requesting database fixtures fails immediately
-    if TEST_DATABASE_URL is not set.
+    Guarantees that any test requesting database fixtures or marked as database integration
+    fails immediately if TEST_DATABASE_URL is not set.
     """
     db_fixtures = {"db_session", "client", "sample_workspace"}
-    if any(f in request.fixturenames for f in db_fixtures):
-        get_test_database_url()
-
-    module_name = request.module.__name__
-    if "postgres" in module_name:
+    requires_db = any(f in request.fixturenames for f in db_fixtures) or (
+        request.node.get_closest_marker("postgres") is not None
+        or request.node.get_closest_marker("integration") is not None
+    )
+    if requires_db:
         get_test_database_url()
 
 
