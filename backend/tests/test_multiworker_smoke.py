@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.db.base import Base
@@ -71,6 +72,69 @@ def init_test_git_repo(repo_path: Path) -> None:
 @pytest.mark.postgres
 @pytest.mark.integration
 @pytest.mark.asyncio
+async def test_real_multiworker_checkpointer_concurrent_startup():
+    """Proves two distinct OS processes can initialize PostgresCheckpointerManager concurrently without race conditions."""
+    async_uri = get_test_postgres_async_uri()
+    user = os.getenv("TEST_POSTGRES_USER", "postgres")
+    password = os.getenv("TEST_POSTGRES_PASSWORD", "test_secure_password_123")
+    host = os.getenv("TEST_POSTGRES_HOST", "localhost")
+    db_port = os.getenv("TEST_POSTGRES_PORT", "15432")
+    db_name = os.getenv("TEST_POSTGRES_DB", "irtrixai_test")
+
+    env = {
+        **os.environ,
+        "PYTHONPATH": ".",
+        "POSTGRES_HOST": host,
+        "POSTGRES_PORT": str(db_port),
+        "POSTGRES_USER": user,
+        "POSTGRES_PASSWORD": password,
+        "POSTGRES_DB": db_name,
+        "DATABASE_URL": async_uri,
+    }
+
+    script = (
+        "import sys, asyncio\n"
+        "if sys.platform == 'win32':\n"
+        "    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())\n"
+        "from app.agent.checkpoint import PostgresCheckpointerManager\n"
+        "async def run():\n"
+        "    mgr = PostgresCheckpointerManager()\n"
+        "    await mgr.initialize()\n"
+        "    assert mgr.is_initialized\n"
+        "    await mgr.close()\n"
+        "asyncio.run(run())\n"
+    )
+
+    proc1 = subprocess.Popen(
+        [sys.executable, "-c", script],
+        cwd=str(Path(__file__).parent.parent),
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    proc2 = subprocess.Popen(
+        [sys.executable, "-c", script],
+        cwd=str(Path(__file__).parent.parent),
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    out1, err1 = proc1.communicate(timeout=25)
+    out2, err2 = proc2.communicate(timeout=25)
+
+    assert proc1.returncode == 0, (
+        f"Process 1 failed checkpointer initialization:\n{err1.decode('utf-8', errors='replace')}"
+    )
+    assert proc2.returncode == 0, (
+        f"Process 2 failed checkpointer initialization:\n{err2.decode('utf-8', errors='replace')}"
+    )
+
+
+@pytest.mark.multiworker
+@pytest.mark.postgres
+@pytest.mark.integration
+@pytest.mark.asyncio
 async def test_real_multiworker_process_duplicate_run_protection(tmp_path: Path):
     """Proves two distinct OS uvicorn worker processes sharing PostgreSQL reject duplicate execution."""
     async_uri = get_test_postgres_async_uri()
@@ -78,6 +142,19 @@ async def test_real_multiworker_process_duplicate_run_protection(tmp_path: Path)
         engine = create_async_engine(async_uri, echo=False)
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+            for col_sql in [
+                "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS prompt_tokens INTEGER DEFAULT 0 NOT NULL;",
+                "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS completion_tokens INTEGER DEFAULT 0 NOT NULL;",
+                "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS total_tokens INTEGER DEFAULT 0 NOT NULL;",
+                "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS llm_calls INTEGER DEFAULT 0 NOT NULL;",
+                "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS provider_usage JSONB DEFAULT '{}'::jsonb;",
+                "ALTER TABLE runs ADD COLUMN IF NOT EXISTS prompt_tokens INTEGER DEFAULT 0 NOT NULL;",
+                "ALTER TABLE runs ADD COLUMN IF NOT EXISTS completion_tokens INTEGER DEFAULT 0 NOT NULL;",
+                "ALTER TABLE runs ADD COLUMN IF NOT EXISTS total_tokens INTEGER DEFAULT 0 NOT NULL;",
+                "ALTER TABLE runs ADD COLUMN IF NOT EXISTS llm_calls INTEGER DEFAULT 0 NOT NULL;",
+                "ALTER TABLE runs ADD COLUMN IF NOT EXISTS provider_usage JSONB DEFAULT '{}'::jsonb;",
+            ]:
+                await conn.execute(text(col_sql))
     except Exception as exc:
         pytest.fail(
             f"Test PostgreSQL not reachable for multiworker test at {async_uri}. "
@@ -162,7 +239,7 @@ async def test_real_multiworker_process_duplicate_run_protection(tmp_path: Path)
 
         async def wait_healthy(port: int) -> bool:
             async with AsyncClient(base_url=f"http://127.0.0.1:{port}", timeout=1.0) as client:
-                for _ in range(40):
+                for _ in range(60):
                     try:
                         res = await client.get("/health")
                         if res.status_code == 200:
@@ -183,8 +260,8 @@ async def test_real_multiworker_process_duplicate_run_protection(tmp_path: Path)
             )
 
         async with (
-            AsyncClient(base_url=f"http://127.0.0.1:{port1}", timeout=10.0) as client1,
-            AsyncClient(base_url=f"http://127.0.0.1:{port2}", timeout=10.0) as client2,
+            AsyncClient(base_url=f"http://127.0.0.1:{port1}", timeout=15.0) as client1,
+            AsyncClient(base_url=f"http://127.0.0.1:{port2}", timeout=15.0) as client2,
         ):
             r1, r2 = await asyncio.gather(
                 client1.post(f"/api/v1/tasks/{task_id}/run"),

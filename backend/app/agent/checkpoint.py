@@ -5,6 +5,9 @@ import re
 from typing import Any
 from urllib.parse import urlparse
 
+from psycopg.rows import dict_row
+from psycopg_pool import AsyncConnectionPool
+
 from app.core.config import settings
 from app.core.exceptions import ToolExecutionException
 
@@ -13,6 +16,11 @@ logger = logging.getLogger(__name__)
 POSTGRES_CREDENTIAL_PATTERN = re.compile(
     r"(postgresql(?:\+[a-z0-9]+)?://)([^:/\s]+):(.+)@([^/@\s]+(?::\d+)?(?:/|\?|$))",
     re.IGNORECASE,
+)
+
+# Fixed deterministic 64-bit integer identifier for checkpointer schema setup advisory lock
+CHECKPOINTER_SETUP_LOCK_KEY: int = (
+    7596528766795491435  # int.from_bytes(b"irtx_chk", "big", signed=True)
 )
 
 
@@ -35,7 +43,7 @@ class PostgresCheckpointerManager:
     def __init__(self) -> None:
         self._checkpointer: Any | None = None
         self._initialized: bool = False
-        self._pool: Any | None = None
+        self._pool: AsyncConnectionPool | None = None
 
     @property
     def is_initialized(self) -> bool:
@@ -50,9 +58,7 @@ class PostgresCheckpointerManager:
         return self._checkpointer
 
     async def initialize(self) -> None:
-        """Initializes AsyncConnectionPool and AsyncPostgresSaver."""
-        from psycopg_pool import AsyncConnectionPool
-
+        """Initializes AsyncConnectionPool and AsyncPostgresSaver with cross-process advisory locking."""
         uri = settings.postgres_uri
         parsed = urlparse(uri)
         logger.info(
@@ -68,27 +74,34 @@ class PostgresCheckpointerManager:
             pool = AsyncConnectionPool(
                 conninfo=uri,
                 max_size=20,
-                kwargs={"autocommit": True, "prepare_threshold": 0},
+                kwargs={"autocommit": True, "prepare_threshold": 0, "row_factory": dict_row},
                 open=False,
             )
             await pool.open()
             self._pool = pool
 
-            saver = AsyncPostgresSaver(pool)
-            try:
-                await saver.setup()
-            except Exception as setup_err:
-                err_str = str(setup_err).lower()
-                if "checkpoint_migrations" in err_str and (
-                    "unique" in err_str or "duplicate" in err_str or "already exists" in err_str
-                ):
-                    logger.info(
-                        "PostgreSQL checkpointer migrations applied concurrently by another worker."
-                    )
-                else:
-                    raise
+            # Acquire a dedicated connection from the pool for session-scoped advisory locking
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "SELECT pg_advisory_lock(%s);",
+                    (CHECKPOINTER_SETUP_LOCK_KEY,),
+                )
+                try:
+                    setup_saver = AsyncPostgresSaver(conn)
+                    await setup_saver.setup()
+                finally:
+                    try:
+                        await conn.execute(
+                            "SELECT pg_advisory_unlock(%s);",
+                            (CHECKPOINTER_SETUP_LOCK_KEY,),
+                        )
+                    except Exception as unlock_err:
+                        logger.warning(
+                            "Failed to release checkpointer setup advisory lock: %s",
+                            sanitize_postgres_error(unlock_err),
+                        )
 
-            self._checkpointer = saver
+            self._checkpointer = AsyncPostgresSaver(pool)
             self._initialized = True
             logger.info("PostgreSQL checkpointer initialized and migrations verified.")
         except Exception as err:
