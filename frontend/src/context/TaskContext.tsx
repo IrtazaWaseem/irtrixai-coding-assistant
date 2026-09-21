@@ -18,6 +18,7 @@ import {
   FinalResult as FinalResultType,
   ReviewResult,
   TestResultData,
+  TokenUsage,
 } from "../types";
 
 export interface TaskContextType {
@@ -31,6 +32,9 @@ export interface TaskContextType {
   testResult: TestResultData | null;
   reviewResult: ReviewResult | null;
   finalResult: FinalResultType | null;
+  tokenUsage: TokenUsage | null;
+  reviewStatus: string | null;
+  reviewAdvisory: string | null;
   error: string | null;
   isLoading: boolean;
   isSubmittingApproval: boolean;
@@ -62,6 +66,9 @@ export const TaskProvider: React.FC<{ children: React.ReactNode }> = ({
   const [testResult, setTestResult] = useState<TestResultData | null>(null);
   const [reviewResult, setReviewResult] = useState<ReviewResult | null>(null);
   const [finalResult, setFinalResult] = useState<FinalResultType | null>(null);
+  const [tokenUsage, setTokenUsage] = useState<TokenUsage | null>(null);
+  const [reviewStatus, setReviewStatus] = useState<string | null>(null);
+  const [reviewAdvisory, setReviewAdvisory] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const [isLoading, setIsLoading] = useState<boolean>(false);
@@ -139,6 +146,11 @@ export const TaskProvider: React.FC<{ children: React.ReactNode }> = ({
     data: any,
     eventId?: string,
   ) => {
+    // Cumulative token usage capture
+    if (data.token_usage) {
+      setTokenUsage(data.token_usage);
+    }
+
     switch (eventType) {
       case "task_started":
         setStatus("running");
@@ -284,12 +296,27 @@ export const TaskProvider: React.FC<{ children: React.ReactNode }> = ({
           security_concerns: [],
           required_changes: [],
         });
+        setReviewStatus("completed");
+        setReviewAdvisory(null);
         addEvent(
           eventType,
           "Code Review Audit Concluded",
           `Verdict: ${data.verdict}`,
           "info",
           undefined,
+          eventId,
+        );
+        break;
+
+      case "review_skipped":
+        setReviewStatus(data.review_status);
+        setReviewAdvisory(data.advisory);
+        addEvent(
+          eventType,
+          "Code Review Skipped (Advisory)",
+          data.advisory || "Review step was skipped; automated tests passed.",
+          "warning",
+          { review_status: data.review_status, advisory: data.advisory },
           eventId,
         );
         break;
@@ -344,6 +371,9 @@ export const TaskProvider: React.FC<{ children: React.ReactNode }> = ({
           if (t.workspace_id) {
             setActiveWorkspaceId(t.workspace_id);
           }
+          if (t.token_usage) {
+            setTokenUsage(t.token_usage);
+          }
           const st = t.status.toLowerCase();
           setStatus(st);
           addEvent(
@@ -383,6 +413,9 @@ export const TaskProvider: React.FC<{ children: React.ReactNode }> = ({
     setFinalResult(null);
     setTestResult(null);
     setReviewResult(null);
+    setTokenUsage(null);
+    setReviewStatus(null);
+    setReviewAdvisory(null);
     cleanupSSE();
 
     try {
@@ -412,6 +445,9 @@ export const TaskProvider: React.FC<{ children: React.ReactNode }> = ({
 
       const execRes = await runTask(created.id);
       setStatus(execRes.status.toLowerCase());
+      if (execRes.token_usage) {
+        setTokenUsage(execRes.token_usage);
+      }
 
       if (execRes.status === "awaiting_approval") {
         setPendingPatch(execRes.interrupt_payload?.pending_patch || null);
@@ -433,6 +469,10 @@ export const TaskProvider: React.FC<{ children: React.ReactNode }> = ({
     try {
       const res = await submitApproval(taskId, { approved: true });
       setStatus(res.status.toLowerCase());
+      if (res.token_usage) {
+        setTokenUsage(res.token_usage);
+      }
+
       addEvent(
         "approval_submitted",
         "Changes Approved by Operator",
@@ -460,6 +500,10 @@ export const TaskProvider: React.FC<{ children: React.ReactNode }> = ({
         feedback: feedbackText || "Rejected by operator",
       });
       setStatus(res.status.toLowerCase());
+      if (res.token_usage) {
+        setTokenUsage(res.token_usage);
+      }
+
       addEvent(
         "approval_rejected",
         "Changes Rejected by Operator",
@@ -496,6 +540,9 @@ export const TaskProvider: React.FC<{ children: React.ReactNode }> = ({
         testResult,
         reviewResult,
         finalResult,
+        tokenUsage,
+        reviewStatus,
+        reviewAdvisory,
         error,
         isLoading,
         isSubmittingApproval,

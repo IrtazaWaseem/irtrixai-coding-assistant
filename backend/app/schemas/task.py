@@ -30,6 +30,23 @@ class TaskCreate(BaseModel):
         return self
 
 
+class TokenUsage(BaseModel):
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    llm_calls: int = 0
+    by_provider: dict[str, Any] = Field(default_factory=dict)
+
+
+class TaskAnalyticsResponse(BaseModel):
+    tasks_count: int
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+    llm_calls: int
+    by_provider: dict[str, Any] = Field(default_factory=dict)
+
+
 class TaskResponse(BaseModel):
     id: str
     workspace_id: str | None = None
@@ -40,6 +57,7 @@ class TaskResponse(BaseModel):
     provider: str | None = None
     model: str | None = None
     error: str | None = None
+    token_usage: TokenUsage | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -71,6 +89,16 @@ class TaskResponse(BaseModel):
 
         st = task.status.value if hasattr(task.status, "value") else str(task.status)
 
+        usage = None
+        if getattr(task, "total_tokens", 0) > 0 or getattr(task, "llm_calls", 0) > 0:
+            usage = TokenUsage(
+                prompt_tokens=getattr(task, "prompt_tokens", 0),
+                completion_tokens=getattr(task, "completion_tokens", 0),
+                total_tokens=getattr(task, "total_tokens", 0),
+                llm_calls=getattr(task, "llm_calls", 0),
+                by_provider=getattr(task, "provider_usage", {}) or {},
+            )
+
         return cls(
             id=str(task.id),
             workspace_id=ws_id,
@@ -81,14 +109,10 @@ class TaskResponse(BaseModel):
             provider=getattr(task, "provider", None),
             model=getattr(task, "model", None),
             error=error,
+            token_usage=usage,
             created_at=task.created_at,
             updated_at=task.updated_at,
         )
-
-
-class ApprovalRequest(BaseModel):
-    approved: bool
-    feedback: str | None = Field(default=None, max_length=2000)
 
 
 class ExecutionResponse(BaseModel):
@@ -96,6 +120,12 @@ class ExecutionResponse(BaseModel):
     status: str
     current_step: int | None = None
     next_step: str | None = None
+    token_usage: TokenUsage | None = None
     interrupt_payload: dict[str, Any] | None = None
     final_result: dict[str, Any] | None = None
     error: str | None = None
+
+
+class ApprovalRequest(BaseModel):
+    approved: bool
+    feedback: str | None = Field(default=None, max_length=2000)

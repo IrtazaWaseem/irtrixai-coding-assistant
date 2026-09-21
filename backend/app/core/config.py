@@ -66,14 +66,29 @@ class Settings(BaseSettings):
     MAX_PATCH_SIZE: int = 262_144  # 256KB
     COMMAND_TIMEOUT_SECONDS: int = 30
 
-    # Day 9 Context Layer Bounded Limits
+    # General Context Layer Limits
     MAX_CONTEXT_FILES: int = 6
     MAX_FILE_CONTEXT_BYTES: int = 8_000
     MAX_TOTAL_CONTEXT_BYTES: int = 30_000
     MAX_EXCERPT_LINES: int = 80
     MAX_CANDIDATE_FILES: int = 1_000
 
-    # Day 3 Docker Sandbox Execution Settings
+    # Ollama Local Bounded Context Limits (Phase 13A-8)
+    OLLAMA_MAX_CONTEXT_FILES: int = 4
+    OLLAMA_MAX_FILE_CONTEXT_BYTES: int = 4_000
+    OLLAMA_MAX_TOTAL_CONTEXT_BYTES: int = 12_000
+    OLLAMA_MAX_EXCERPT_LINES: int = 60
+    OLLAMA_MAX_WORKSPACE_SUMMARY_BYTES: int = 12_000
+    OLLAMA_MAX_OUTPUT_TOKENS: int = 4_096
+
+    # LangSmith Observability (Phase 13A-8: Opt-In)
+    LANGSMITH_TRACING: bool = False
+    LANGSMITH_API_KEY: str = ""
+    LANGSMITH_PROJECT: str = "irtrixai"
+    LANGSMITH_ENDPOINT: str | None = None
+    LANGSMITH_WORKSPACE_ID: str | None = None
+
+    # Docker Sandbox Execution Settings
     DOCKER_SANDBOX_IMAGE: str = "irtrixai-sandbox:latest"
     SANDBOX_TIMEOUT_SECONDS: int = 30
     SANDBOX_MEMORY_LIMIT: str = "512m"

@@ -43,6 +43,9 @@ class AgentState(TypedDict):
     debugger_output: DebuggerOutput | dict[str, Any] | None
     repair_count: int
     review_summary: ReviewerOutput | dict[str, Any] | None
+    review_status: str | None
+    review_advisory: str | None
+    token_usage: dict[str, Any]
     final_result: FinalizationResult | dict[str, Any] | None
     error: str | None
     current_step: int
@@ -78,6 +81,15 @@ def create_initial_state(
         "debugger_output": None,
         "repair_count": 0,
         "review_summary": None,
+        "review_status": None,
+        "review_advisory": None,
+        "token_usage": {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "llm_calls": 0,
+            "by_provider": {},
+        },
         "final_result": None,
         "error": None,
         "current_step": 0,
@@ -116,6 +128,8 @@ def validate_state_invariants(state: AgentState | dict[str, Any]) -> bool:
 
     for k, v in state.items():
         k_lower = str(k).lower()
+        if k_lower == "token_usage":
+            continue
         if any(term in k_lower for term in SENSITIVE_KEY_TERMS):
             raise ValueError(f"Security violation: state contains sensitive key '{k}'.")
         if isinstance(v, str) and any(term in v.lower() for term in ("aizasy", "bearer ")):

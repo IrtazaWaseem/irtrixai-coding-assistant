@@ -7,6 +7,7 @@ from app.core.exceptions import (
     LLMAuthenticationException,
     LLMConfigurationException,
     LLMConnectionException,
+    LLMInvalidModelException,
     LLMProviderUnavailableException,
     LLMRateLimitException,
     LLMResponseException,
@@ -21,7 +22,6 @@ logger = logging.getLogger(__name__)
 
 
 def _has_capability(provider: LLMProvider | None, capability: str) -> bool:
-    """Safely extracts a capability boolean whether provider.capabilities is an object or dict."""
     if provider is None:
         return False
     caps = getattr(provider, "capabilities", None)
@@ -32,8 +32,17 @@ def _has_capability(provider: LLMProvider | None, capability: str) -> bool:
     return bool(getattr(caps, capability, False))
 
 
+FALLBACK_ELIGIBLE_EXCEPTIONS = (
+    LLMTimeoutException,
+    LLMProviderUnavailableException,
+    LLMConnectionException,
+    LLMRateLimitException,
+    LLMInvalidModelException,
+)
+
+
 class LLMGateway:
-    """Authoritative provider-neutral gateway for LLM capabilities."""
+    """Authoritative provider-neutral gateway for LLM capabilities with token telemetry."""
 
     def __init__(
         self,
@@ -45,6 +54,7 @@ class LLMGateway:
         self._resolved = primary_provider is not None
         self.last_used_provider: str | None = None
         self.last_used_model: str | None = None
+        self.last_usage: dict[str, int] | None = None
 
     def _ensure_providers(self) -> None:
         if not self._resolved:
@@ -76,6 +86,7 @@ class LLMGateway:
         system_instruction: str | None = None,
         temperature: float | None = None,
         max_output_tokens: int | None = None,
+        allow_fallback: bool = True,
     ) -> LLMResponse:
         if not prompt or not prompt.strip():
             raise LLMResponseException("Prompt cannot be empty.")
@@ -89,19 +100,10 @@ class LLMGateway:
             )
             self.last_used_provider = self.primary.provider_name
             self.last_used_model = self.primary.model
-            logger.info(
-                "LLM generation fulfilled by %s (%s)",
-                self.last_used_provider,
-                self.last_used_model,
-            )
+            self.last_usage = self.primary.last_usage
             return res
-        except (
-            LLMTimeoutException,
-            LLMProviderUnavailableException,
-            LLMConnectionException,
-            LLMRateLimitException,
-        ) as exc:
-            if self.fallback is not None:
+        except FALLBACK_ELIGIBLE_EXCEPTIONS as exc:
+            if allow_fallback and self.fallback is not None:
                 logger.warning(
                     "Primary provider '%s' failed (%s); triggering fallback provider '%s'",
                     self.primary.provider_name,
@@ -116,11 +118,7 @@ class LLMGateway:
                 )
                 self.last_used_provider = self.fallback.provider_name
                 self.last_used_model = self.fallback.model
-                logger.info(
-                    "LLM generation fulfilled by fallback %s (%s)",
-                    self.last_used_provider,
-                    self.last_used_model,
-                )
+                self.last_usage = self.fallback.last_usage
                 return res
             raise
 
@@ -131,6 +129,7 @@ class LLMGateway:
         *,
         system_instruction: str | None = None,
         temperature: float | None = None,
+        allow_fallback: bool = True,
     ) -> T:
         if not _has_capability(self.primary, "supports_structured_output"):
             raise LLMUnsupportedCapabilityException(
@@ -147,20 +146,13 @@ class LLMGateway:
             )
             self.last_used_provider = self.primary.provider_name
             self.last_used_model = self.primary.model
-            logger.info(
-                "Structured generation fulfilled by %s (%s)",
-                self.last_used_provider,
-                self.last_used_model,
-            )
+            self.last_usage = self.primary.last_usage
             return res
-        except (
-            LLMTimeoutException,
-            LLMProviderUnavailableException,
-            LLMConnectionException,
-            LLMRateLimitException,
-        ) as exc:
-            if self.fallback is not None and _has_capability(
-                self.fallback, "supports_structured_output"
+        except FALLBACK_ELIGIBLE_EXCEPTIONS as exc:
+            if (
+                allow_fallback
+                and self.fallback is not None
+                and _has_capability(self.fallback, "supports_structured_output")
             ):
                 logger.warning(
                     "Primary provider '%s' failed (%s); triggering fallback structured provider '%s'",
@@ -176,6 +168,7 @@ class LLMGateway:
                 )
                 self.last_used_provider = self.fallback.provider_name
                 self.last_used_model = self.fallback.model
+                self.last_usage = self.fallback.last_usage
                 return res
             raise
 
@@ -186,8 +179,8 @@ class LLMGateway:
         system_instruction: str | None = None,
         temperature: float | None = None,
         max_output_tokens: int | None = None,
+        allow_fallback: bool = True,
     ) -> AsyncIterator[LLMStreamChunk]:
-        """Dispatches streaming request with capability validation and restart-signaled fallback."""
         if not _has_capability(self.primary, "supports_streaming"):
             raise LLMUnsupportedCapabilityException(
                 f"Provider '{self.primary.provider_name}' with model '{self.primary.model}' "
@@ -206,13 +199,12 @@ class LLMGateway:
             ):
                 yielded_any = True
                 yield chunk
-        except (
-            LLMTimeoutException,
-            LLMProviderUnavailableException,
-            LLMConnectionException,
-            LLMRateLimitException,
-        ) as exc:
-            if self.fallback is not None and _has_capability(self.fallback, "supports_streaming"):
+        except FALLBACK_ELIGIBLE_EXCEPTIONS as exc:
+            if (
+                allow_fallback
+                and self.fallback is not None
+                and _has_capability(self.fallback, "supports_streaming")
+            ):
                 logger.warning(
                     "Primary provider '%s' stream failed (%s); triggering fallback stream '%s' (yielded_any=%s)",
                     self.primary.provider_name,
@@ -238,13 +230,12 @@ class LLMGateway:
 
 
 def create_task_llm_gateway(provider: str, model: str) -> LLMGateway:
-    """Builds an isolated, task-scoped LLMGateway without mutating global settings."""
     from app.core.config import settings
 
     prov = provider.strip().lower()
     if prov not in ("gemini", "groq", "ollama"):
         raise LLMConfigurationException(
-            f"Unsupported LLM provider '{prov}'. Allowed providers are: 'gemini', 'groq', 'ollama'."
+            f"Unsupported LLM provider '{prov}'. Allowed providers: 'gemini', 'groq', 'ollama'."
         )
 
     clean_model = model.strip()

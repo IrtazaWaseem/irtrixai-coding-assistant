@@ -66,6 +66,15 @@ class Task(Base, TimestampMixin):
         index=True,
     )
 
+    # Token Telemetry (Phase 13A-8)
+    prompt_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    completion_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    total_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    llm_calls: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    provider_usage: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB, default=dict, nullable=True
+    )
+
     workspace: Mapped["Workspace"] = relationship("Workspace", back_populates="tasks")
     runs: Mapped[list["Run"]] = relationship(
         "Run",
@@ -123,6 +132,15 @@ class Run(Base):
     finished_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
+    )
+
+    # Token Telemetry (Phase 13A-8)
+    prompt_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    completion_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    total_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    llm_calls: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    provider_usage: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB, default=dict, nullable=True
     )
 
     task: Mapped["Task"] = relationship("Task", back_populates="runs")

@@ -422,3 +422,57 @@ class TaskService:
         db.add(task)
         await db.commit()
         return await TaskService.get_task(db, str(task.id))
+
+    @staticmethod
+    async def sync_runtime_metrics(
+        db: AsyncSession, task_id: str | uuid.UUID, state_or_snap: Any
+    ) -> None:
+        """Idempotently syncs cumulative token telemetry from LangGraph state to Task & Run records."""
+        try:
+            task_uuid = uuid.UUID(str(task_id))
+        except (ValueError, AttributeError):
+            return
+
+        if isinstance(state_or_snap, dict):
+            values = state_or_snap
+        elif hasattr(state_or_snap, "values"):
+            v = state_or_snap.values
+            values = v() if callable(v) else v
+        else:
+            values = {}
+
+        if not isinstance(values, dict):
+            values = {}
+
+        usage = values.get("token_usage", {}) or {}
+        if not isinstance(usage, dict) or not usage:
+            return
+
+        p_tokens = int(usage.get("prompt_tokens", 0) or 0)
+        c_tokens = int(usage.get("completion_tokens", 0) or 0)
+        t_tokens = int(usage.get("total_tokens", p_tokens + c_tokens) or (p_tokens + c_tokens))
+        calls = int(usage.get("llm_calls", 0) or 0)
+        by_prov = usage.get("by_provider", {}) or {}
+
+        task_stmt = select(Task).options(selectinload(Task.runs)).where(Task.id == task_uuid)
+        res = await db.execute(task_stmt)
+        task = res.scalar_one_or_none()
+        if not task:
+            return
+
+        task.prompt_tokens = p_tokens
+        task.completion_tokens = c_tokens
+        task.total_tokens = t_tokens
+        task.llm_calls = calls
+        task.provider_usage = by_prov
+
+        if task.runs and len(task.runs) > 0:
+            latest_run = task.runs[-1]
+            latest_run.prompt_tokens = p_tokens
+            latest_run.completion_tokens = c_tokens
+            latest_run.total_tokens = t_tokens
+            latest_run.llm_calls = calls
+            latest_run.provider_usage = by_prov
+
+        db.add(task)
+        await db.commit()

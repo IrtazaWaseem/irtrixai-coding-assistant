@@ -5,6 +5,7 @@ from typing import Any
 import httpx
 from pydantic import BaseModel
 
+from app.core.config import settings
 from app.core.exceptions import (
     LLMConnectionException,
     LLMInvalidModelException,
@@ -123,9 +124,7 @@ class OllamaProvider(LLMProvider):
                 resp.raise_for_status()
                 data = resp.json()
             else:
-                async with httpx.AsyncClient(
-                    timeout=self.config.timeout_seconds
-                ) as client:
+                async with httpx.AsyncClient(timeout=self.config.timeout_seconds) as client:
                     resp = await client.post(url, json=payload)
                     resp.raise_for_status()
                     data = resp.json()
@@ -138,18 +137,20 @@ class OllamaProvider(LLMProvider):
         if not content and not data.get("done", False):
             raise LLMResponseException("Ollama returned empty response.")
 
-        usage: dict[str, Any] = {}
-        if "prompt_eval_count" in data:
-            usage["prompt_tokens"] = data["prompt_eval_count"]
-        if "eval_count" in data:
-            usage["completion_tokens"] = data["eval_count"]
+        p_tokens = data.get("prompt_eval_count", 0) or 0
+        c_tokens = data.get("eval_count", 0) or 0
+        self.last_usage = {
+            "prompt_tokens": p_tokens,
+            "completion_tokens": c_tokens,
+            "total_tokens": p_tokens + c_tokens,
+        }
 
         return LLMResponse(
             content=content,
             model=self.model,
             provider="ollama",
             finish_reason=data.get("done_reason", "stop"),
-            raw_usage=usage or None,
+            raw_usage=self.last_usage,
         )
 
     async def generate_structured[T: BaseModel](
@@ -159,6 +160,7 @@ class OllamaProvider(LLMProvider):
         *,
         system_instruction: str | None = None,
         temperature: float | None = None,
+        max_output_tokens: int | None = None,
     ) -> T:
         schema_json = json.dumps(response_schema.model_json_schema())
         instruction = (
@@ -166,10 +168,17 @@ class OllamaProvider(LLMProvider):
             f"You MUST reply with a valid JSON object strictly matching this schema: {schema_json}"
         ).strip()
 
+        effective_max_tokens = (
+            max_output_tokens
+            if max_output_tokens is not None
+            else getattr(settings, "OLLAMA_MAX_OUTPUT_TOKENS", 4096)
+        )
+
         payload = self._build_payload(
             prompt=prompt,
             system_instruction=instruction,
             temperature=temperature,
+            max_output_tokens=effective_max_tokens,
             stream=False,
             format_json=True,
         )
@@ -181,15 +190,21 @@ class OllamaProvider(LLMProvider):
                 resp.raise_for_status()
                 data = resp.json()
             else:
-                async with httpx.AsyncClient(
-                    timeout=self.config.timeout_seconds
-                ) as client:
+                async with httpx.AsyncClient(timeout=self.config.timeout_seconds) as client:
                     resp = await client.post(url, json=payload)
                     resp.raise_for_status()
                     data = resp.json()
         except Exception as err:
             self._handle_http_error(err)
             raise LLMProviderException(f"Unexpected Ollama error: {err}") from err
+
+        p_tokens = data.get("prompt_eval_count", 0) or 0
+        c_tokens = data.get("eval_count", 0) or 0
+        self.last_usage = {
+            "prompt_tokens": p_tokens,
+            "completion_tokens": c_tokens,
+            "total_tokens": p_tokens + c_tokens,
+        }
 
         content = data.get("message", {}).get("content", "")
         return parse_structured_output(content, response_schema)
@@ -233,6 +248,4 @@ class OllamaProvider(LLMProvider):
                     yield LLMStreamChunk(delta=delta, finish_reason=reason)
         except Exception as err:
             self._handle_http_error(err)
-            raise LLMProviderException(
-                f"Unexpected Ollama streaming error: {err}"
-            ) from err
+            raise LLMProviderException(f"Unexpected Ollama streaming error: {err}") from err

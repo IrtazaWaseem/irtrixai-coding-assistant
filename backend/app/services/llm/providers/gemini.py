@@ -29,11 +29,7 @@ logger = logging.getLogger(__name__)
 
 
 def _get_genai_types() -> Any:
-    """Returns google.genai.types if installed, or a mock-compatible fallback object.
-
-    Prevents ModuleNotFoundError in environments where google-genai is not installed
-    while maintaining full compatibility with injected mock clients.
-    """
+    """Returns google.genai.types if installed, or a mock-compatible fallback object."""
     try:
         from google.genai import types
 
@@ -62,19 +58,12 @@ class GeminiProvider(LLMProvider):
         config: LLMConfig,
         client: Any | None = None,
     ) -> None:
-        """Initializes the Gemini provider.
-
-        Args:
-            config: Configuration settings for model execution.
-            client: Optional pre-configured or mocked GenAI client instance.
-        """
         super().__init__(config=config)
         self._client = client
         if self._client is None and not (self.config.api_key and self.config.api_key.strip()):
             raise LLMAuthenticationException("Gemini API key is required")
 
     def _get_client(self) -> Any:
-        """Returns the active GenAI client or initializes a production client lazily."""
         if self._client is not None:
             return self._client
 
@@ -89,14 +78,6 @@ class GeminiProvider(LLMProvider):
             ) from err
 
     def _map_error(self, err: Exception) -> Exception:
-        """Translates upstream GenAI and HTTP errors into normalized domain exceptions.
-
-        Args:
-            err: Raw exception raised during client communication.
-
-        Returns:
-            Normalized domain exception (RateLimit, Authentication, Connection, Model, or Provider).
-        """
         err_msg = str(err)
         if self.config.api_key and self.config.api_key in err_msg:
             err_msg = err_msg.replace(self.config.api_key, "[REDACTED]")
@@ -151,7 +132,6 @@ class GeminiProvider(LLMProvider):
         return LLMProviderException(f"Gemini provider error: {err_msg}")
 
     def _extract_json_from_text(self, text: str) -> str:
-        """Strips markdown fences and reasoning blocks to locate the raw JSON payload."""
         cleaned = text.strip()
         cleaned = re.sub(r"<think>[\s\S]*?</think>", "", cleaned).strip()
         fence_match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", cleaned)
@@ -160,15 +140,6 @@ class GeminiProvider(LLMProvider):
         return cleaned
 
     async def generate(self, prompt: str, **kwargs: Any) -> LLMResponse:
-        """Executes a single text generation request against Gemini.
-
-        Args:
-            prompt: Text prompt to send to the model.
-            **kwargs: Extra parameters passed to the request.
-
-        Returns:
-            LLMResponse containing the text output and metadata.
-        """
         client = self._get_client()
         types = _get_genai_types()
         config_params: dict[str, Any] = {}
@@ -189,16 +160,17 @@ class GeminiProvider(LLMProvider):
             raw_usage = None
             if hasattr(response, "usage_metadata") and response.usage_metadata is not None:
                 usage = response.usage_metadata
-                prompt_tokens = getattr(usage, "prompt_token_count", 0)
-                completion_tokens = getattr(usage, "candidates_token_count", 0)
+                prompt_tokens = getattr(usage, "prompt_token_count", 0) or 0
+                completion_tokens = getattr(usage, "candidates_token_count", 0) or 0
                 total_tokens = getattr(
                     usage, "total_token_count", prompt_tokens + completion_tokens
-                )
+                ) or (prompt_tokens + completion_tokens)
                 raw_usage = {
                     "prompt_tokens": prompt_tokens,
                     "completion_tokens": completion_tokens,
                     "total_tokens": total_tokens,
                 }
+            self.last_usage = raw_usage
 
             return LLMResponse(
                 content=raw_text,
@@ -213,16 +185,6 @@ class GeminiProvider(LLMProvider):
     async def generate_structured[T: BaseModel](
         self, prompt: str, response_schema: type[T], **kwargs: Any
     ) -> T:
-        """Generates content and enforces strict validation against a Pydantic schema.
-
-        Args:
-            prompt: Text prompt containing instruction instructions.
-            response_schema: Target Pydantic model type.
-            **kwargs: Extra parameters passed to the generation request.
-
-        Returns:
-            Validated instance of response_schema.
-        """
         client = self._get_client()
         types = _get_genai_types()
         config_params: dict[str, Any] = {
@@ -241,6 +203,23 @@ class GeminiProvider(LLMProvider):
                 contents=prompt,
                 config=config,
             )
+
+            # Extract token telemetry for structured generation (Phase 13A-8)
+            if hasattr(response, "usage_metadata") and response.usage_metadata is not None:
+                usage = response.usage_metadata
+                prompt_tokens = getattr(usage, "prompt_token_count", 0) or 0
+                completion_tokens = getattr(usage, "candidates_token_count", 0) or 0
+                total_tokens = getattr(
+                    usage, "total_token_count", prompt_tokens + completion_tokens
+                ) or (prompt_tokens + completion_tokens)
+                self.last_usage = {
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "total_tokens": total_tokens,
+                }
+            else:
+                self.last_usage = None
+
             raw_text = response.text or ""
             if not raw_text.strip():
                 raise LLMResponseException("Gemini returned empty structured content")
@@ -273,15 +252,6 @@ class GeminiProvider(LLMProvider):
             raise self._map_error(err) from err
 
     async def stream(self, prompt: str, **kwargs: Any) -> AsyncIterator[str]:
-        """Streams text chunks incrementally as they are produced by Gemini.
-
-        Args:
-            prompt: Text prompt for generation.
-            **kwargs: Extra parameters passed to the request.
-
-        Yields:
-            Incremental string tokens as they arrive.
-        """
         client = self._get_client()
         types = _get_genai_types()
         config_params: dict[str, Any] = {}
@@ -305,7 +275,6 @@ class GeminiProvider(LLMProvider):
 
     @property
     def capabilities(self) -> dict[str, Any]:
-        """Returns the capabilities profile for Google Gemini models."""
         return {
             "supports_streaming": True,
             "supports_structured_output": True,
@@ -315,11 +284,9 @@ class GeminiProvider(LLMProvider):
 
     @property
     def display_name(self) -> str:
-        """Returns the canonical display name for the Gemini model."""
         return f"Google Gemini ({self.config.model})"
 
     def get_model_info(self) -> ModelInfo:
-        """Returns normalized model metadata matching the provider specification."""
         info = super().get_model_info()
         try:
             info.display_name = f"Google Gemini ({self.config.model})"

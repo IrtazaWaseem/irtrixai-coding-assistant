@@ -1,11 +1,3 @@
-export interface ExecutionResponse {
-  task_id: string;
-  status: string;
-  node?: string;
-  interrupt_payload?: any;
-  final_result?: any;
-}
-
 export interface ApprovalRequest {
   approved: boolean;
   feedback?: string;
@@ -136,7 +128,21 @@ export interface TaskCreatePayload {
   model?: string;
   prompt: string;
 }
-
+export interface TokenUsage {
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  llm_calls: number;
+  by_provider?: Record<string, any>;
+}
+export interface TaskAnalyticsResponse {
+  tasks_count: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  llm_calls: number;
+  by_provider?: Record<string, any>;
+}
 export interface TaskResponse {
   id: string;
   workspace_id?: string;
@@ -146,6 +152,8 @@ export interface TaskResponse {
   provider?: string;
   model?: string;
   status: string;
+  error?: string | null;
+  token_usage?: TokenUsage | null;
   created_at?: string;
   updated_at?: string;
   interrupt_payload?: {
@@ -166,4 +174,14 @@ export interface TerminalExecutionResponse {
   stderr: string;
   truncated: boolean;
   duration_seconds?: number | null;
+}
+export interface ExecutionResponse {
+  task_id: string;
+  status: string;
+  current_step?: number | null;
+  next_step?: string | null;
+  token_usage?: TokenUsage | null;
+  interrupt_payload?: any;
+  final_result?: any;
+  error?: string | null;
 }

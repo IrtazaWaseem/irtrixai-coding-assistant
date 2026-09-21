@@ -34,6 +34,7 @@ class LLMProvider(ABC):
         self.config = config
         self.provider_name = config.provider.strip().lower()
         self.model = config.model.strip()
+        self.last_usage: dict[str, int] | None = None
 
     @property
     @abstractmethod

@@ -14,6 +14,7 @@ import {
   ShieldAlert,
   TestTube2,
   Wrench,
+  Zap,
 } from "lucide-react";
 import { ApprovalGate } from "../components/ApprovalGate";
 import { CodeWorkspace } from "../components/CodeWorkspace";
@@ -38,6 +39,9 @@ export const HomePage: React.FC = () => {
     testResult,
     reviewResult,
     finalResult,
+    tokenUsage,
+    reviewStatus,
+    reviewAdvisory,
     error,
     isLoading,
     isSubmittingApproval,
@@ -59,7 +63,11 @@ export const HomePage: React.FC = () => {
   } else if (status === "running") {
     for (let i = events.length - 1; i >= 0; i--) {
       const type = events[i].type;
-      if (type === "review_started" || type === "test_passed") {
+      if (
+        type === "review_started" ||
+        type === "review_skipped" ||
+        type === "test_passed"
+      ) {
         activeStepId = "review";
         break;
       }
@@ -89,6 +97,11 @@ export const HomePage: React.FC = () => {
 
   const isSuccessful = status === "completed";
   const isFailed = status === "failed" || status === "aborted";
+
+  const isReviewSkipped =
+    reviewStatus === "skipped_due_to_rate_limit" ||
+    reviewStatus === "skipped_due_to_llm_error" ||
+    hasEvent("review_skipped");
 
   const PIPELINE_STEPS = [
     {
@@ -156,9 +169,9 @@ export const HomePage: React.FC = () => {
       : []),
     {
       id: "review",
-      label: "Review",
+      label: isReviewSkipped ? "Review (Skipped)" : "Review",
       icon: ShieldAlert,
-      isDone: hasEvent("review_started") && isSuccessful,
+      isDone: (hasEvent("review_started") || isReviewSkipped) && isSuccessful,
       isActive: activeStepId === "review",
     },
     {
@@ -221,6 +234,21 @@ export const HomePage: React.FC = () => {
           </div>
 
           <div className="flex items-center gap-3 text-xs font-mono">
+            {/* Live Token Telemetry Badge (Requirement M) */}
+            {tokenUsage && tokenUsage.total_tokens > 0 && (
+              <div className="bg-zinc-950 px-3 py-1.5 rounded-lg border border-zinc-800/80 flex items-center gap-2 font-mono text-xs">
+                <Zap className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                <span className="text-zinc-500">Tokens:</span>
+                <span className="text-zinc-200 font-bold">
+                  {tokenUsage.total_tokens.toLocaleString()}
+                </span>
+                <span className="text-zinc-600 text-[10px]">
+                  (In: {tokenUsage.prompt_tokens.toLocaleString()} · Out:{" "}
+                  {tokenUsage.completion_tokens.toLocaleString()})
+                </span>
+              </div>
+            )}
+
             <div className="bg-zinc-950 px-3 py-1.5 rounded-lg border border-zinc-800/80 flex items-center gap-2">
               <span className="text-zinc-500">Repairs:</span>
               <span
@@ -520,7 +548,27 @@ export const HomePage: React.FC = () => {
                     <div className="space-y-4">
                       <FinalResult result={finalResult} error={error} />
                       {testResult && <TestResults testResult={testResult} />}
-                      {reviewResult && <ReviewOutcome review={reviewResult} />}
+
+                      {/* Quality Review Outcome or Skipped Banner */}
+                      {reviewResult ? (
+                        <ReviewOutcome review={reviewResult} />
+                      ) : isReviewSkipped ? (
+                        <div className="bg-zinc-950/80 border border-amber-800/60 rounded-xl p-4 space-y-2 font-mono text-xs shadow-md">
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-2 text-amber-400 font-semibold">
+                              <ShieldAlert className="w-4 h-4" />
+                              <span>Code Review Audit: Skipped (Advisory)</span>
+                            </div>
+                            <span className="text-[10px] bg-amber-950/60 text-amber-300 px-2 py-0.5 rounded border border-amber-800/60">
+                              Tests Passed
+                            </span>
+                          </div>
+                          <p className="text-zinc-300 text-[11px] leading-relaxed">
+                            {reviewAdvisory ||
+                              "Automated verification tests succeeded in the Docker sandbox. The optional code review audit was skipped due to provider unavailability or rate limits."}
+                          </p>
+                        </div>
+                      ) : null}
                     </div>
                   )}
 
@@ -568,10 +616,15 @@ export const HomePage: React.FC = () => {
               {/* Tab 5: Verification Evidence */}
               {activeTab === "evidence" && (
                 <div className="space-y-4">
-                  {testResult || reviewResult ? (
+                  {testResult || reviewResult || isReviewSkipped ? (
                     <>
                       {testResult && <TestResults testResult={testResult} />}
                       {reviewResult && <ReviewOutcome review={reviewResult} />}
+                      {isReviewSkipped && !reviewResult && (
+                        <div className="bg-zinc-950 border border-zinc-800/80 rounded-xl p-4 text-xs font-mono text-zinc-400">
+                          Code review was skipped: {reviewAdvisory}
+                        </div>
+                      )}
                     </>
                   ) : (
                     <div className="bg-zinc-950 border border-zinc-800 rounded-xl p-8 text-center text-xs font-mono text-zinc-500">

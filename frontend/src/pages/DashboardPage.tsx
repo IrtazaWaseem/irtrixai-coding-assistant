@@ -9,23 +9,30 @@ import {
   RotateCw,
   Server,
   XCircle,
+  Zap,
 } from "lucide-react";
 import { getLLMInfo, getSystemStatus, getWorkspaces } from "../services/api";
 import {
   LLMInfoResponse,
   SystemStatusResponse,
+  TaskAnalyticsResponse,
   WorkspaceResponse,
 } from "../types";
 import { useTaskExecution } from "../context/TaskContext";
 
+const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
+
 export const DashboardPage: React.FC = () => {
-  const { taskId, status, events } = useTaskExecution();
+  const { taskId, status, events, tokenUsage } = useTaskExecution();
 
   const [systemStatus, setSystemStatus] = useState<SystemStatusResponse | null>(
     null,
   );
   const [llmInfo, setLlmInfo] = useState<LLMInfoResponse | null>(null);
   const [workspaces, setWorkspaces] = useState<WorkspaceResponse[]>([]);
+  const [analytics, setAnalytics] = useState<TaskAnalyticsResponse | null>(
+    null,
+  );
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -33,14 +40,18 @@ export const DashboardPage: React.FC = () => {
     setIsLoading(true);
     setError(null);
     try {
-      const [sys, llm, ws] = await Promise.all([
+      const [sys, llm, ws, anRes] = await Promise.all([
         getSystemStatus(),
         getLLMInfo(),
         getWorkspaces(),
+        fetch(`${API_BASE}/api/v1/tasks/analytics`)
+          .then((r) => (r.ok ? r.json() : null))
+          .catch(() => null),
       ]);
       setSystemStatus(sys);
       setLlmInfo(llm);
       setWorkspaces(ws);
+      setAnalytics(anRes);
     } catch (err: any) {
       setError(err.message || "Failed to load system telemetry.");
     } finally {
@@ -107,7 +118,7 @@ export const DashboardPage: React.FC = () => {
         <div>
           <h1 className="text-xl font-bold text-zinc-100">System Telemetry</h1>
           <p className="text-xs text-zinc-400 mt-0.5">
-            Operational runtime parameters, LLM model gateway, and workspace
+            Operational runtime parameters, token analytics, and workspace
             status.
           </p>
         </div>
@@ -138,9 +149,9 @@ export const DashboardPage: React.FC = () => {
         </div>
       )}
 
-      {/* Primary Telemetry Grid */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-        {/* Backend Orchestrator */}
+      {/* Primary Telemetry Grid: 5-Card Dashboard */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
+        {/* 1. Backend Orchestrator */}
         <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4 flex flex-col justify-between space-y-3 shadow-md">
           <div className="flex items-center justify-between text-zinc-400 text-xs">
             <span className="font-semibold uppercase tracking-wider text-[10px] font-mono text-zinc-400">
@@ -170,7 +181,7 @@ export const DashboardPage: React.FC = () => {
           </div>
         </div>
 
-        {/* LLM Gateway */}
+        {/* 2. LLM Gateway */}
         <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4 flex flex-col justify-between space-y-3 shadow-md">
           <div className="flex items-center justify-between text-zinc-400 text-xs">
             <span className="font-semibold uppercase tracking-wider text-[10px] font-mono text-zinc-400">
@@ -193,7 +204,28 @@ export const DashboardPage: React.FC = () => {
           </div>
         </div>
 
-        {/* Current Task */}
+        {/* 3. Token Consumption Telemetry (Requirement M) */}
+        <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4 flex flex-col justify-between space-y-3 shadow-md">
+          <div className="flex items-center justify-between text-zinc-400 text-xs">
+            <span className="font-semibold uppercase tracking-wider text-[10px] font-mono text-zinc-400">
+              Token Consumption
+            </span>
+            <Zap className="w-4 h-4 text-amber-400" />
+          </div>
+          <div>
+            <div className="font-medium text-zinc-100 text-sm font-mono">
+              {analytics ? analytics.total_tokens.toLocaleString() : "0"} Total
+            </div>
+            <div className="text-[11px] font-mono text-zinc-500 mt-1">
+              In: {analytics ? analytics.prompt_tokens.toLocaleString() : "0"} ·
+              Out:{" "}
+              {analytics ? analytics.completion_tokens.toLocaleString() : "0"} (
+              {analytics?.llm_calls || 0} calls)
+            </div>
+          </div>
+        </div>
+
+        {/* 4. Current Task */}
         <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4 flex flex-col justify-between space-y-3 shadow-md">
           <div className="flex items-center justify-between text-zinc-400 text-xs">
             <span className="font-semibold uppercase tracking-wider text-[10px] font-mono text-zinc-400">
@@ -211,7 +243,7 @@ export const DashboardPage: React.FC = () => {
           </div>
         </div>
 
-        {/* Registered Workspaces */}
+        {/* 5. Registered Workspaces */}
         <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4 flex flex-col justify-between space-y-3 shadow-md">
           <div className="flex items-center justify-between text-zinc-400 text-xs">
             <span className="font-semibold uppercase tracking-wider text-[10px] font-mono text-zinc-400">
@@ -306,6 +338,14 @@ export const DashboardPage: React.FC = () => {
                       {events.length}
                     </span>
                   </div>
+                  {tokenUsage && (
+                    <div className="flex justify-between items-center pt-1 border-t border-zinc-900">
+                      <span className="text-zinc-500">Tokens Consumed:</span>
+                      <span className="text-amber-400 font-semibold">
+                        {tokenUsage.total_tokens.toLocaleString()}
+                      </span>
+                    </div>
+                  )}
                 </div>
 
                 {events.length > 0 && (
