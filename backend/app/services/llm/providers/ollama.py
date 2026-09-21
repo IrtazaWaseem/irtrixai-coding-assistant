@@ -37,6 +37,8 @@ class OllamaProvider(LLMProvider):
             raise LLMInvalidModelException("Ollama model ID cannot be empty.")
         self.base_url = (config.base_url or "http://localhost:11434").rstrip("/")
         self._injected_client = client
+        # Default to 180s timeout for local LLM prompt ingestion & cold loads
+        self._timeout = max(float(self.config.timeout_seconds or 60.0), 180.0)
 
     @property
     def capabilities(self) -> ProviderCapabilities:
@@ -54,7 +56,7 @@ class OllamaProvider(LLMProvider):
         temperature: float | None = None,
         max_output_tokens: int | None = None,
         stream: bool = False,
-        format_json: bool = False,
+        format_spec: str | dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         messages: list[dict[str, str]] = []
         if system_instruction and system_instruction.strip():
@@ -74,16 +76,14 @@ class OllamaProvider(LLMProvider):
         }
         if options:
             payload["options"] = options
-        if format_json:
-            payload["format"] = "json"
+        if format_spec is not None:
+            payload["format"] = format_spec
 
         return payload
 
     def _handle_http_error(self, err: Exception) -> None:
         if isinstance(err, httpx.TimeoutException):
-            raise LLMTimeoutException(
-                f"Ollama request timed out after {self.config.timeout_seconds}s."
-            ) from err
+            raise LLMTimeoutException(f"Ollama request timed out after {self._timeout}s.") from err
         if isinstance(err, (httpx.ConnectError, httpx.NetworkError)):
             raise LLMConnectionException(
                 f"Failed to connect to Ollama at '{self.base_url}'. Verify the daemon is running."
@@ -124,7 +124,7 @@ class OllamaProvider(LLMProvider):
                 resp.raise_for_status()
                 data = resp.json()
             else:
-                async with httpx.AsyncClient(timeout=self.config.timeout_seconds) as client:
+                async with httpx.AsyncClient(timeout=self._timeout) as client:
                     resp = await client.post(url, json=payload)
                     resp.raise_for_status()
                     data = resp.json()
@@ -162,10 +162,12 @@ class OllamaProvider(LLMProvider):
         temperature: float | None = None,
         max_output_tokens: int | None = None,
     ) -> T:
-        schema_json = json.dumps(response_schema.model_json_schema())
+        schema_dict = response_schema.model_json_schema()
+        schema_json = json.dumps(schema_dict)
         instruction = (
             f"{system_instruction or ''}\n"
-            f"You MUST reply with a valid JSON object strictly matching this schema: {schema_json}"
+            f"You MUST output populated values for the fields defined in this schema: {schema_json}. "
+            "Do NOT output the schema definitions or properties metadata; output the concrete populated data."
         ).strip()
 
         effective_max_tokens = (
@@ -180,7 +182,7 @@ class OllamaProvider(LLMProvider):
             temperature=temperature,
             max_output_tokens=effective_max_tokens,
             stream=False,
-            format_json=True,
+            format_spec=schema_dict,
         )
         url = f"{self.base_url}/api/chat"
 
@@ -190,7 +192,7 @@ class OllamaProvider(LLMProvider):
                 resp.raise_for_status()
                 data = resp.json()
             else:
-                async with httpx.AsyncClient(timeout=self.config.timeout_seconds) as client:
+                async with httpx.AsyncClient(timeout=self._timeout) as client:
                     resp = await client.post(url, json=payload)
                     resp.raise_for_status()
                     data = resp.json()
@@ -207,6 +209,25 @@ class OllamaProvider(LLMProvider):
         }
 
         content = data.get("message", {}).get("content", "")
+
+        # Defensive unwrap: if a model outputs {"properties": {...}}, extract the values
+        try:
+            parsed_raw = json.loads(content)
+            if (
+                isinstance(parsed_raw, dict)
+                and "properties" in parsed_raw
+                and not any(k in parsed_raw for k in response_schema.model_fields)
+            ):
+                extracted = {}
+                for k, v in parsed_raw["properties"].items():
+                    if isinstance(v, dict):
+                        extracted[k] = v.get("default") or v.get("value") or v.get("example") or ""
+                    else:
+                        extracted[k] = v
+                content = json.dumps(extracted)
+        except Exception:
+            pass
+
         return parse_structured_output(content, response_schema)
 
     async def stream(
@@ -230,7 +251,7 @@ class OllamaProvider(LLMProvider):
             client_ctx = (
                 self._injected_client
                 if self._injected_client is not None
-                else httpx.AsyncClient(timeout=self.config.timeout_seconds)
+                else httpx.AsyncClient(timeout=self._timeout)
             )
             async with client_ctx.stream("POST", url, json=payload) as resp:
                 resp.raise_for_status()

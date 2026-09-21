@@ -15,8 +15,14 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
   onTabChange,
   children,
 }) => {
-  const { taskId, activeWorkspaceId, status, connectionState, handleReset } =
-    useTaskExecution();
+  const {
+    taskId,
+    activeWorkspaceId,
+    status,
+    connectionState,
+    handleReset,
+    isCancelling,
+  } = useTaskExecution();
   const [isTerminalOpen, setIsTerminalOpen] = useState(false);
 
   return (
@@ -27,6 +33,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
           status={status}
           connectionState={connectionState}
           onReset={handleReset}
+          isCancelling={isCancelling}
           isTerminalOpen={isTerminalOpen}
           onToggleTerminal={() => setIsTerminalOpen((prev) => !prev)}
         />

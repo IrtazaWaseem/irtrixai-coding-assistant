@@ -393,35 +393,50 @@ class TaskService:
     async def update_task_status(
         db: AsyncSession, task: Task, status: str, error: str | None = None
     ) -> Task:
+        query = (
+            select(Task)
+            .options(selectinload(Task.workspace), selectinload(Task.runs))
+            .where(Task.id == task.id)
+            .with_for_update()
+        )
+        res = await db.execute(query)
+        db_task = res.scalar_one_or_none() or task
+
+        # Invariant: Terminal states (CANCELLED, COMPLETED, FAILED) cannot be overwritten
+        # by a stale or lagging execution graph result.
+        if db_task.status in (TaskStatus.CANCELLED, TaskStatus.COMPLETED, TaskStatus.FAILED):
+            await db.commit()
+            return db_task
+
         status_upper = status.upper()
         if status_upper in TaskStatus.__members__:
-            task.status = TaskStatus[status_upper]
+            db_task.status = TaskStatus[status_upper]
         elif status_upper == "RUNNING":
-            task.status = TaskStatus.RUNNING
+            db_task.status = TaskStatus.RUNNING
         elif status_upper in ("COMPLETED", "SUCCESS"):
-            task.status = TaskStatus.COMPLETED
+            db_task.status = TaskStatus.COMPLETED
         elif status_upper in ("FAILED", "ERROR"):
-            task.status = TaskStatus.FAILED
+            db_task.status = TaskStatus.FAILED
         elif status_upper in ("AWAITING_APPROVAL", "APPROVAL_REQUIRED"):
-            task.status = TaskStatus.AWAITING_APPROVAL
+            db_task.status = TaskStatus.AWAITING_APPROVAL
         elif status_upper in ("ABORTED", "CANCELLED"):
-            task.status = TaskStatus.CANCELLED
+            db_task.status = TaskStatus.CANCELLED
 
-        if "runs" in task.__dict__ and task.runs and len(task.runs) > 0:
-            latest_run = task.runs[-1]
-            latest_run.status = task.status
+        if "runs" in db_task.__dict__ and db_task.runs and len(db_task.runs) > 0:
+            latest_run = db_task.runs[-1]
+            latest_run.status = db_task.status
             if error:
                 latest_run.error_message = error
-            if task.status in (
+            if db_task.status in (
                 TaskStatus.COMPLETED,
                 TaskStatus.FAILED,
                 TaskStatus.CANCELLED,
             ):
                 latest_run.finished_at = datetime.now(UTC)
 
-        db.add(task)
+        db.add(db_task)
         await db.commit()
-        return await TaskService.get_task(db, str(task.id))
+        return await TaskService.get_task(db, str(db_task.id))
 
     @staticmethod
     async def sync_runtime_metrics(
@@ -476,3 +491,45 @@ class TaskService:
 
         db.add(task)
         await db.commit()
+
+    @staticmethod
+    async def cancel_task(db: AsyncSession, task_id: str | uuid.UUID) -> Task:
+        """Transitions an active task to CANCELLED and releases workspace locks immediately."""
+        try:
+            task_uuid = uuid.UUID(str(task_id))
+        except (ValueError, AttributeError) as err:
+            raise AppException(
+                status_code=404,
+                message=f"Task '{task_id}' not found.",
+            ) from err
+
+        query = (
+            select(Task)
+            .options(selectinload(Task.workspace), selectinload(Task.runs))
+            .where(Task.id == task_uuid)
+            .with_for_update()
+        )
+        result = await db.execute(query)
+        task = result.scalar_one_or_none()
+        if not task:
+            raise AppException(
+                status_code=404,
+                message=f"Task '{task_id}' not found.",
+            )
+
+        # Idempotent: If already in a terminal state, return without modifying state
+        if task.status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED):
+            await db.commit()
+            return task
+
+        task.status = TaskStatus.CANCELLED
+        if "runs" in task.__dict__ and task.runs and len(task.runs) > 0:
+            latest_run = task.runs[-1]
+            latest_run.status = TaskStatus.CANCELLED
+            latest_run.finished_at = datetime.now(UTC)
+            if not latest_run.error_message:
+                latest_run.error_message = "Task cancelled by operator."
+
+        db.add(task)
+        await db.commit()
+        return await TaskService.get_task(db, str(task.id))

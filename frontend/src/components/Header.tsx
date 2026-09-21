@@ -13,6 +13,7 @@ interface HeaderProps {
   status: string;
   connectionState: "connected" | "reconnecting" | "disconnected" | "idle";
   onReset: () => void;
+  isCancelling?: boolean;
   isTerminalOpen?: boolean;
   onToggleTerminal?: () => void;
 }
@@ -22,6 +23,7 @@ export const Header: React.FC<HeaderProps> = ({
   status,
   connectionState,
   onReset,
+  isCancelling = false,
   isTerminalOpen,
   onToggleTerminal,
 }) => {
@@ -63,6 +65,7 @@ export const Header: React.FC<HeaderProps> = ({
         return "bg-emerald-950/60 text-emerald-300 border-emerald-800/60";
       case "failed":
       case "aborted":
+      case "cancelled":
         return "bg-rose-950/60 text-rose-300 border-rose-800/60";
       default:
         return "bg-zinc-900 text-zinc-300 border-zinc-700/80";
@@ -184,15 +187,20 @@ export const Header: React.FC<HeaderProps> = ({
             </div>
           )}
 
-          {/* New Task / Reset Action */}
+          {/* New Task Action */}
           {taskId && (
             <button
               onClick={onReset}
-              className="flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-mono font-medium text-zinc-300 hover:text-zinc-100 bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 hover:border-zinc-700 transition-colors shadow-sm"
-              title="Reset active execution and start a new task"
+              disabled={isCancelling}
+              className="flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-mono font-medium text-zinc-300 hover:text-zinc-100 bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 hover:border-zinc-700 transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
+              title="Cancel active execution and start a new task"
             >
-              <RotateCcw className="w-3 h-3 text-zinc-400" />
-              <span className="hidden sm:inline">New Task</span>
+              <RotateCcw
+                className={`w-3 h-3 text-zinc-400 ${isCancelling ? "animate-spin text-amber-400" : ""}`}
+              />
+              <span className="hidden sm:inline">
+                {isCancelling ? "Cancelling active task..." : "New Task"}
+              </span>
             </button>
           )}
         </div>

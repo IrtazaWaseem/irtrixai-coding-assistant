@@ -294,37 +294,98 @@ def _extract_target_from_header(old_line: str, new_line: str) -> str:
     return new_path or old_path
 
 
+def _resolve_workspace_target(
+    target: str,
+    workspace_root: Path,
+    files_changed: list[str] | None = None,
+) -> str:
+    """Resolves target diff file path against actual workspace directory structure and declared files."""
+    if not target or target.lower() in ("unknown.py", "none", "/dev/null"):
+        target = ""
+
+    clean_target = target.replace("\\", "/").strip().lstrip("/")
+
+    # 1. Exact relative path exists on disk
+    if clean_target and (workspace_root / clean_target).is_file():
+        return clean_target
+
+    candidates = [f.replace("\\", "/").strip().lstrip("/") for f in (files_changed or []) if f]
+
+    # 2. Match against declared files_changed
+    if clean_target:
+        for c in candidates:
+            if (workspace_root / c).is_file():
+                if (
+                    c == clean_target
+                    or Path(c).name.lower() == Path(clean_target).name.lower()
+                    or c.endswith(clean_target)
+                    or clean_target.endswith(c)
+                ):
+                    return c
+
+    # 3. Match filename in workspace root
+    if clean_target:
+        fname = Path(clean_target).name
+        if (workspace_root / fname).is_file():
+            return fname
+
+    # 4. If target was empty/unknown but candidates exist, pick first existing candidate
+    for c in candidates:
+        if (workspace_root / c).is_file():
+            return c
+
+    # 5. Fallback to first candidate if specified, else clean_target
+    if candidates:
+        return candidates[0]
+
+    return clean_target or target
+
+
 def split_unified_diff(patch_text: str) -> list[tuple[str, str]]:
     if not patch_text or not patch_text.strip():
         return []
 
-    lines = patch_text.splitlines(keepends=True)
+    # Strip markdown code blocks if the model wrapped the diff
+    cleaned = patch_text.strip()
+    if cleaned.startswith("```"):
+        lines_raw = cleaned.splitlines()
+        if lines_raw and lines_raw[0].startswith("```"):
+            lines_raw = lines_raw[1:]
+        if lines_raw and lines_raw[-1].strip() == "```":
+            lines_raw = lines_raw[:-1]
+        cleaned = "\n".join(lines_raw).strip()
+
+    lines = cleaned.splitlines(keepends=True)
     file_indices: list[int] = []
     file_targets: list[str] = []
 
     i = 0
     while i < len(lines):
         line = lines[i]
+        line_str = line.strip()
         target = ""
 
-        if line.startswith("diff --git "):
+        if line_str.startswith("diff --git "):
             old_line, new_line = "", ""
-            for k in range(1, min(5, len(lines) - i)):
-                nxt = lines[i + k]
+            for k in range(1, min(6, len(lines) - i)):
+                nxt = lines[i + k].strip()
                 if nxt.startswith("--- "):
                     old_line = nxt
                 elif nxt.startswith("+++ "):
                     new_line = nxt
                     break
             target = _extract_target_from_header(old_line, new_line)
-        elif line.startswith("--- "):
-            old_line = line
-            new_line = (
-                lines[i + 1] if i + 1 < len(lines) and lines[i + 1].startswith("+++ ") else ""
-            )
+        elif line_str.startswith("--- "):
+            old_line = line_str
+            new_line = ""
+            for k in range(1, min(4, len(lines) - i)):
+                nxt = lines[i + k].strip()
+                if nxt.startswith("+++ "):
+                    new_line = nxt
+                    break
             target = _extract_target_from_header(old_line, new_line)
 
-        if target:
+        if target and target != "/dev/null":
             file_indices.append(i)
             file_targets.append(target)
             i += 1
@@ -335,11 +396,14 @@ def split_unified_diff(patch_text: str) -> list[tuple[str, str]]:
     if not file_indices:
         fallback_target = ""
         for line in lines:
-            if line.startswith("--- ") or line.startswith("+++ "):
-                fallback_target = _clean_header_path(line[4:])
+            line_str = line.strip()
+            if line_str.startswith("--- ") or line_str.startswith("+++ "):
+                fallback_target = _clean_header_path(line_str[4:])
                 if fallback_target and fallback_target != "/dev/null":
                     break
-        return [(fallback_target or "unknown.py", patch_text)]
+        if fallback_target:
+            return [(fallback_target, cleaned)]
+        return []
 
     chunks: list[tuple[str, str]] = []
     for idx, start_idx in enumerate(file_indices):
@@ -355,7 +419,11 @@ def extract_all_patch_targets(patch_text: str) -> list[str]:
     chunks = split_unified_diff(patch_text)
     targets: list[str] = []
     for target, _ in chunks:
-        if target and target not in targets:
+        if (
+            target
+            and target.lower() not in ("unknown.py", "none", "/dev/null")
+            and target not in targets
+        ):
             targets.append(target)
     return targets
 
@@ -451,7 +519,7 @@ async def inspect_workspace(state: AgentState) -> dict[str, Any]:
         except Exception as read_err:
             logger.debug("Manifest read skipped: %s", read_err)
 
-    # Provider-aware workspace summary limit (Requirement S)
+    # Provider-aware workspace summary limit
     max_summary_bytes = settings.MAX_TOOL_OUTPUT_BYTES
     if state.get("provider") == "ollama":
         max_summary_bytes = getattr(settings, "OLLAMA_MAX_WORKSPACE_SUMMARY_BYTES", 12_000)
@@ -478,7 +546,7 @@ async def repository_context(
     ws_summary = state.get("workspace_summary")
     tech_stack = state.get("tech_stack", [])
 
-    # Provider-aware context bounding (Requirement R & S)
+    # Provider-aware context bounding
     is_ollama = state.get("provider") == "ollama"
     max_files = settings.OLLAMA_MAX_CONTEXT_FILES if is_ollama else settings.MAX_CONTEXT_FILES
     max_file_bytes = (
@@ -1003,6 +1071,8 @@ async def reviewer(state: AgentState, config: RunnableConfig | None = None) -> d
     files_changed_val = _get_val(coder_prop, "files_changed", [])
     files_touched = ", ".join(files_changed_val) if files_changed_val else "None"
 
+    prior_error = state.get("error")
+
     prompt = (
         f"Authoritative Test Status: {'PASSED' if test_passed else 'FAILED / UNVERIFIED'}\n"
         f"Test Output:\n{test_output}\n\n"
@@ -1013,7 +1083,7 @@ async def reviewer(state: AgentState, config: RunnableConfig | None = None) -> d
     )
 
     try:
-        # Reviewer fails fast without hanging on fallback (Requirement C)
+        # Reviewer fails fast without hanging on fallback
         try:
             review = await gateway.generate_structured(
                 prompt=prompt,
@@ -1022,7 +1092,6 @@ async def reviewer(state: AgentState, config: RunnableConfig | None = None) -> d
                 allow_fallback=False,
             )
         except TypeError:
-            # Fallback for mock gateways in existing tests that don't accept allow_fallback
             review = await gateway.generate_structured(
                 prompt=prompt,
                 response_schema=ReviewerOutput,
@@ -1054,14 +1123,14 @@ async def reviewer(state: AgentState, config: RunnableConfig | None = None) -> d
             "review_advisory": None,
             "token_usage": updated_usage,
             "current_step": 7,
-            "error": None,
+            "error": prior_error,
         }
     except Exception as err:
         from app.core.exceptions import LLMRateLimitException
 
         clean_err = sanitize_error_message(err)
-        # Requirement A: Graceful Degradation if tests passed
-        if test_passed:
+        # Graceful Degradation ONLY if tests passed AND no prior unrecovered node error
+        if test_passed and not prior_error:
             is_rate_limit = (
                 isinstance(err, LLMRateLimitException)
                 or "429" in clean_err
@@ -1089,10 +1158,10 @@ async def reviewer(state: AgentState, config: RunnableConfig | None = None) -> d
                 "error": None,
             }
 
-        # Defensive rule: If authoritative tests did NOT pass, reviewer failure remains an error
-        logger.error("Node [reviewer] review generation failed: %s", clean_err)
+        failure_msg = prior_error or f"Reviewer failed: {clean_err}"
+        logger.error("Node [reviewer] review generation failed: %s", failure_msg)
         return {
-            "error": f"Reviewer failed: {clean_err}",
+            "error": failure_msg,
             "review_status": "failed",
             "review_advisory": clean_err,
             "current_step": 7,
@@ -1111,7 +1180,7 @@ async def finalize(state: AgentState) -> dict[str, Any]:
     review_advisory = state.get("review_advisory")
 
     review_verdict = _get_val(review, "verdict")
-    verdict_str = str(getattr(review_verdict, "value", review_verdict) or "").lower()
+    verdict_str = str(getattr(review_verdict, "value", review_verdict) or "").strip().lower()
     review_summary_text = _get_val(review, "summary", "")
 
     metadata: dict[str, Any] = {
@@ -1144,17 +1213,16 @@ async def finalize(state: AgentState) -> dict[str, Any]:
         summary = f"Task failed: reviewer requested changes: {review_summary_text}"
     elif (
         test_passed
-        and approval is True
+        and bool(approval) is True
         and review_status in ("skipped_due_to_rate_limit", "skipped_due_to_llm_error")
     ):
-        # Requirement B: Task COMPLETED when authoritative tests pass and review was gracefully skipped
         status = "completed"
         advisory_note = f" ({review_advisory})" if review_advisory else ""
         summary = (
             f"Task completed successfully and all tests verified. Optional code review "
             f"was skipped{advisory_note}."
         )
-    elif verdict_str == "approved" and approval is True:
+    elif verdict_str == "approved" and bool(approval) is True:
         status = "completed"
         summary = "Task completed successfully and all tests verified"
     elif review is None:
@@ -1197,7 +1265,7 @@ async def apply_approved_patch(state: AgentState) -> dict[str, Any]:
 
     logger.info("Node [apply_approved_patch] invoked (approval=%s)", approval)
 
-    if approval is not True:
+    if bool(approval) is not True:
         return {
             "applied_diff": None,
             "error": "Patch application denied: human approval was not granted.",
@@ -1219,28 +1287,56 @@ async def apply_approved_patch(state: AgentState) -> dict[str, Any]:
 
     resolved_ws = ws_obj.resolve()
     chunks = split_unified_diff(pending_patch)
-    if not chunks:
-        coder_prop = state.get("coder_proposal")
-        files_changed = _get_val(coder_prop, "files_changed", [])
+
+    coder_prop = state.get("coder_proposal")
+    files_changed = _get_val(coder_prop, "files_changed", []) or []
+
+    # Discard any chunk with an invalid or dummy target like 'unknown.py'
+    valid_chunks = [
+        (t, c) for t, c in chunks if t and t.lower() not in ("unknown.py", "none", "/dev/null")
+    ]
+
+    # If diff parser yielded no valid chunks, use declared files_changed
+    if not valid_chunks:
         if files_changed:
-            chunks = [(f, pending_patch) for f in files_changed]
+            if len(files_changed) == 1:
+                valid_chunks = [(files_changed[0], pending_patch)]
+            else:
+                fallback_target = extract_patch_target_file(pending_patch)
+                if fallback_target and fallback_target.lower() not in (
+                    "unknown.py",
+                    "none",
+                    "/dev/null",
+                ):
+                    valid_chunks = [(fallback_target, pending_patch)]
+                else:
+                    valid_chunks = [(files_changed[0], pending_patch)]
         else:
             first_target = extract_patch_target_file(pending_patch)
-            if first_target:
-                chunks = [(first_target, pending_patch)]
+            if first_target and first_target.lower() not in ("unknown.py", "none", "/dev/null"):
+                valid_chunks = [(first_target, pending_patch)]
+
+    chunks = valid_chunks
 
     if not chunks:
         return {
             "applied_diff": None,
             "tool_result": {
                 "success": False,
-                "error": "Unable to determine target file(s) from patch.",
+                "error": "Unable to determine target file(s) from patch or proposal.",
                 "output": None,
                 "metadata": {},
             },
-            "error": "Patch application failed: unable to determine target file(s) from patch.",
+            "error": "Patch application failed: unable to determine target file(s) from patch or proposal.",
             "current_step": 4,
         }
+
+    # Resolve target paths against actual repository files
+    resolved_chunks: list[tuple[str, str]] = []
+    for target, chunk_content in chunks:
+        resolved_target = _resolve_workspace_target(target, resolved_ws, files_changed)
+        resolved_chunks.append((resolved_target, chunk_content))
+    chunks = resolved_chunks
 
     seen_targets: set[str] = set()
     for target, _ in chunks:
@@ -1259,10 +1355,8 @@ async def apply_approved_patch(state: AgentState) -> dict[str, Any]:
             }
         seen_targets.add(norm_target)
 
-    coder_prop = state.get("coder_proposal")
     all_targets_to_validate: set[str] = {target for target, _ in chunks}
-    files_changed_list = _get_val(coder_prop, "files_changed", [])
-    for f in files_changed_list:
+    for f in files_changed:
         all_targets_to_validate.add(f)
 
     for target in all_targets_to_validate:

@@ -37,21 +37,21 @@ class Settings(BaseSettings):
     TEST_DATABASE_URL: str | None = None
 
     # LLM Providers & Gateway Configuration
-    PRIMARY_LLM_PROVIDER: str = "ollama"
-    PRIMARY_LLM_MODEL: str = "qwen-gpu-tuned"
-    FALLBACK_LLM_PROVIDER: str | None = None
-    FALLBACK_LLM_MODEL: str | None = None
+    PRIMARY_LLM_PROVIDER: str = "gemini"
+    PRIMARY_LLM_MODEL: str = "gemini-2.5-flash"
+    FALLBACK_LLM_PROVIDER: str | None = "groq"
+    FALLBACK_LLM_MODEL: str | None = "openai/gpt-oss-120b"
 
     GEMINI_API_KEY: str = ""
     GEMINI_MODEL: str = "gemini-2.5-flash"
 
     GROQ_API_KEY: str = ""
-    GROQ_MODEL: str = "llama-3.3-70b-versatile"
+    GROQ_MODEL: str = "openai/gpt-oss-120b"
 
     OLLAMA_BASE_URL: str = "http://localhost:11434"
-    OLLAMA_MODEL: str = "qwen-gpu-tuned"
+    OLLAMA_MODEL: str = "qwen2.5vl:7b"
 
-    LLM_REQUEST_TIMEOUT_SECONDS: int = 60
+    LLM_REQUEST_TIMEOUT_SECONDS: int = 180
     LLM_MAX_RETRIES: int = 3
     LLM_THINKING_LEVEL: str = "low"
 

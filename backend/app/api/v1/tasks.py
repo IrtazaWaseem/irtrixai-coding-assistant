@@ -139,6 +139,7 @@ async def get_task(
     return TaskResponse.from_task(task)
 
 
+
 @router.post("/{task_id}/run", response_model=ExecutionResponse)
 async def run_task(
     task_id: str,
@@ -155,6 +156,15 @@ async def run_task(
         snap = await graph.aget_state(config)
         usage_val = snap.values.get("token_usage") if snap else None
         usage = TokenUsage(**usage_val) if usage_val else None
+
+        # If already cancelled, do not evaluate checkpoint next-steps (e.g. approval_gate)
+        if task.status == TaskStatus.CANCELLED:
+            return ExecutionResponse(
+                task_id=str(task.id),
+                status="cancelled",
+                current_step=snap.values.get("current_step", 8) if snap else 8,
+                token_usage=usage,
+            )
 
         if snap and snap.next == ("approval_gate",):
             coder_prop = snap.values.get("coder_proposal")
@@ -175,6 +185,7 @@ async def run_task(
                     "coder_summary": coder_summary,
                 },
             )
+
         final = snap.values.get("final_result") if snap else None
         status = getattr(final, "status", None) or (
             final.get("status") if isinstance(final, dict) else str(task.status).lower()
@@ -213,7 +224,16 @@ async def run_task(
         usage = TokenUsage(**usage_val) if usage_val else None
 
         if post_snap.next == ("approval_gate",):
-            await TaskService.update_task_status(db, task, "awaiting_approval")
+            updated_task = await TaskService.update_task_status(db, task, "awaiting_approval")
+            # If cancelled in DB while graph was executing, do not return awaiting_approval
+            if updated_task.status == TaskStatus.CANCELLED:
+                return ExecutionResponse(
+                    task_id=str(task.id),
+                    status="cancelled",
+                    current_step=post_snap.values.get("current_step", 4),
+                    token_usage=usage,
+                )
+
             coder_prop = post_snap.values.get("coder_proposal")
             coder_summary = (
                 coder_prop.summary
@@ -237,10 +257,10 @@ async def run_task(
         status = getattr(final, "status", None) or (
             final.get("status") if isinstance(final, dict) else "completed"
         )
-        await TaskService.update_task_status(db, task, status)
+        updated_task = await TaskService.update_task_status(db, task, status)
         return ExecutionResponse(
             task_id=str(task.id),
-            status=status,
+            status=updated_task.status.value.lower(),
             current_step=post_snap.values.get("current_step", 8),
             token_usage=usage,
             final_result=(final.model_dump() if hasattr(final, "model_dump") else final),
@@ -278,7 +298,15 @@ async def submit_approval(
         usage = TokenUsage(**usage_val) if usage_val else None
 
         if post_snap.next == ("approval_gate",):
-            await TaskService.update_task_status(db, task, "awaiting_approval")
+            updated_task = await TaskService.update_task_status(db, task, "awaiting_approval")
+            if updated_task.status == TaskStatus.CANCELLED:
+                return ExecutionResponse(
+                    task_id=str(task.id),
+                    status="cancelled",
+                    current_step=post_snap.values.get("current_step", 4),
+                    token_usage=usage,
+                )
+
             coder_prop = post_snap.values.get("coder_proposal")
             coder_summary = (
                 coder_prop.summary
@@ -302,10 +330,10 @@ async def submit_approval(
         status = getattr(final, "status", None) or (
             final.get("status") if isinstance(final, dict) else "completed"
         )
-        await TaskService.update_task_status(db, task, status)
+        updated_task = await TaskService.update_task_status(db, task, status)
         return ExecutionResponse(
             task_id=str(task.id),
-            status=status,
+            status=updated_task.status.value.lower(),
             current_step=post_snap.values.get("current_step", 8),
             token_usage=usage,
             final_result=(final.model_dump() if hasattr(final, "model_dump") else final),
@@ -317,7 +345,6 @@ async def submit_approval(
         logger.error("Task approval error on task '%s': %s", task_id, clean_err)
         await TaskService.update_task_status(db, task, "failed", error=clean_err)
         return ExecutionResponse(task_id=str(task.id), status="failed", error=clean_err)
-
 
 def _format_sse(event: str, data: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
@@ -507,3 +534,12 @@ async def stream_task_events(
             yield _format_sse("task_failed", {"error": clean_err})
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+@router.post("/{task_id}/cancel", response_model=TaskResponse)
+async def cancel_task(
+    task_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> TaskResponse:
+    """Cancels an active task, releases workspace lock, and marks it terminal."""
+    task = await TaskService.cancel_task(db, task_id)
+    return TaskResponse.from_task(task)

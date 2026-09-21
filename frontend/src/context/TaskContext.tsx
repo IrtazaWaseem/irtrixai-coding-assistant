@@ -7,6 +7,7 @@ import React, {
   useState,
 } from "react";
 import {
+  cancelTask,
   createTask,
   getTask,
   runTask,
@@ -38,6 +39,7 @@ export interface TaskContextType {
   error: string | null;
   isLoading: boolean;
   isSubmittingApproval: boolean;
+  isCancelling: boolean;
   connectionState: "connected" | "reconnecting" | "disconnected" | "idle";
   handleStartTask: (
     wsPathOrId: string,
@@ -47,10 +49,17 @@ export interface TaskContextType {
   ) => Promise<void>;
   handleApprove: () => Promise<void>;
   handleReject: (feedbackText: string) => Promise<void>;
-  handleReset: () => void;
+  handleReset: () => Promise<void>;
 }
 
 const TaskContext = createContext<TaskContextType | undefined>(undefined);
+
+const isTerminalStatus = (st: string): boolean => {
+  const s = st.toLowerCase();
+  return (
+    s === "completed" || s === "failed" || s === "cancelled" || s === "aborted"
+  );
+};
 
 export const TaskProvider: React.FC<{ children: React.ReactNode }> = ({
   children,
@@ -74,18 +83,22 @@ export const TaskProvider: React.FC<{ children: React.ReactNode }> = ({
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [isSubmittingApproval, setIsSubmittingApproval] =
     useState<boolean>(false);
+  const [isCancelling, setIsCancelling] = useState<boolean>(false);
   const [connectionState, setConnectionState] = useState<
     "connected" | "reconnecting" | "disconnected" | "idle"
   >("idle");
 
   const unsubscribeSseRef = useRef<(() => void) | null>(null);
+  const activeSseTaskIdRef = useRef<string | null>(null);
   const seenEventKeysRef = useRef<Set<string>>(new Set());
 
   const cleanupSSE = useCallback(() => {
+    activeSseTaskIdRef.current = null;
     if (unsubscribeSseRef.current) {
       unsubscribeSseRef.current();
       unsubscribeSseRef.current = null;
     }
+    setConnectionState("idle");
   }, []);
 
   const addEvent = useCallback(
@@ -123,20 +136,32 @@ export const TaskProvider: React.FC<{ children: React.ReactNode }> = ({
   const connectSSE = useCallback(
     (id: string) => {
       cleanupSSE();
+      activeSseTaskIdRef.current = id;
       setConnectionState("connected");
       const unsubscribe = subscribeToEvents(
         id,
         (eventType: string, data: any, eventId?: string) => {
+          if (activeSseTaskIdRef.current !== id) {
+            return; // Stale event discarded
+          }
           handleServerEvent(eventType, data, eventId);
         },
         (err: Event) => {
+          if (activeSseTaskIdRef.current !== id) {
+            return;
+          }
           console.warn("SSE encountered a connection issue:", err);
           setConnectionState("reconnecting");
         },
       );
 
-      unsubscribeSseRef.current = unsubscribe;
-      return unsubscribe;
+      unsubscribeSseRef.current = () => {
+        if (activeSseTaskIdRef.current === id) {
+          activeSseTaskIdRef.current = null;
+        }
+        unsubscribe();
+      };
+      return unsubscribeSseRef.current;
     },
     [cleanupSSE],
   );
@@ -146,7 +171,6 @@ export const TaskProvider: React.FC<{ children: React.ReactNode }> = ({
     data: any,
     eventId?: string,
   ) => {
-    // Cumulative token usage capture
     if (data.token_usage) {
       setTokenUsage(data.token_usage);
     }
@@ -355,6 +379,20 @@ export const TaskProvider: React.FC<{ children: React.ReactNode }> = ({
           eventId,
         );
         break;
+
+      case "task_cancelled":
+        setStatus("cancelled");
+        setConnectionState("disconnected");
+        cleanupSSE();
+        addEvent(
+          eventType,
+          "Task Cancelled",
+          data.summary || "Task was cancelled by operator.",
+          "warning",
+          undefined,
+          eventId,
+        );
+        break;
     }
   };
 
@@ -520,11 +558,49 @@ export const TaskProvider: React.FC<{ children: React.ReactNode }> = ({
     }
   };
 
-  const handleReset = () => {
+  const handleReset = async () => {
+    if (isCancelling) return;
+
+    // If an active non-terminal task exists, cancel it first on the backend
+    if (taskId && !isTerminalStatus(status)) {
+      setIsCancelling(true);
+      try {
+        await cancelTask(taskId);
+      } catch (err: any) {
+        console.error("Task cancellation error:", err);
+        setError(err.message || "Failed to cancel active task.");
+        setIsCancelling(false);
+        return; // Preserve active state so the user remains aware of backend state
+      } finally {
+        setIsCancelling(false);
+      }
+    }
+
+    // After cancellation succeeds or if task was already terminal, clear local state cleanly
     cleanupSSE();
     localStorage.removeItem("irtrixai_active_task_id");
+
+    if (window.location.search.includes("taskId")) {
+      const url = new URL(window.location.href);
+      url.searchParams.delete("taskId");
+      window.history.replaceState({}, "", url.pathname + url.search + url.hash);
+    }
+
+    setTaskId(null);
     setActiveWorkspaceId(null);
-    window.location.href = window.location.pathname;
+    setStatus("idle");
+    setEvents([]);
+    setPendingPatch(null);
+    setCoderSummary(null);
+    setTestResult(null);
+    setReviewResult(null);
+    setFinalResult(null);
+    setTokenUsage(null);
+    setReviewStatus(null);
+    setReviewAdvisory(null);
+    setError(null);
+    setConnectionState("idle");
+    seenEventKeysRef.current.clear();
   };
 
   return (
@@ -546,6 +622,7 @@ export const TaskProvider: React.FC<{ children: React.ReactNode }> = ({
         error,
         isLoading,
         isSubmittingApproval,
+        isCancelling,
         connectionState,
         handleStartTask,
         handleApprove,

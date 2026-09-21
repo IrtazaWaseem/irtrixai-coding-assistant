@@ -110,6 +110,7 @@ export function subscribeToEvents(
     "task_started",
     "task_not_started",
     "workspace_inspected",
+    "repository_context_ready",
     "planning",
     "coding",
     "approval_required",
@@ -119,8 +120,10 @@ export function subscribeToEvents(
     "test_failed",
     "repair_started",
     "review_started",
+    "review_skipped",
     "task_completed",
     "task_failed",
+    "task_cancelled",
   ];
 
   eventNames.forEach((eventName) => {
@@ -275,4 +278,11 @@ export async function executeTerminalCommand(
     },
   );
   return handleResponse<TerminalExecutionResponse>(res);
+}
+export async function cancelTask(taskId: string): Promise<TaskResponse> {
+  const res = await fetch(`${API_BASE}/api/v1/tasks/${taskId}/cancel`, {
+    method: "POST",
+    headers: { Accept: "application/json" },
+  });
+  return handleResponse<TaskResponse>(res);
 }
