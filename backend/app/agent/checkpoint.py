@@ -1,5 +1,6 @@
 """PostgreSQL checkpointer manager for LangGraph agent persistence."""
 
+import asyncio
 import logging
 import re
 from typing import Any
@@ -18,7 +19,7 @@ POSTGRES_CREDENTIAL_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-# Fixed deterministic 64-bit integer identifier for checkpointer schema setup advisory lock
+# Fixed deterministic 64-bit integer identifier for checkpointer setup advisory lock
 CHECKPOINTER_SETUP_LOCK_KEY: int = (
     7596528766795491435  # int.from_bytes(b"irtx_chk", "big", signed=True)
 )
@@ -80,12 +81,34 @@ class PostgresCheckpointerManager:
             await pool.open()
             self._pool = pool
 
-            # Acquire a dedicated connection from the pool for session-scoped advisory locking
+            # Acquire a dedicated connection from the pool for session-scoped advisory locking.
+            # We use non-blocking pg_try_advisory_lock with an async sleep retry loop rather
+            # than blocking pg_advisory_lock. Why: AsyncPostgresSaver.setup() issues
+            # CREATE INDEX CONCURRENTLY, which waits for all concurrent virtual transactions to
+            # complete. A blocking pg_advisory_lock call holds an open virtual transaction while
+            # waiting, which causes PostgreSQL to detect a mutual deadlock between the index
+            # build and the advisory lock. Non-blocking polling avoids holding a virtual transaction
+            # while waiting.
             async with pool.connection() as conn:
-                await conn.execute(
-                    "SELECT pg_advisory_lock(%s);",
-                    (CHECKPOINTER_SETUP_LOCK_KEY,),
-                )
+                acquired = False
+                for _ in range(300):  # Poll up to 30 seconds (300 * 0.1s)
+                    res = await conn.execute(
+                        "SELECT pg_try_advisory_lock(%s);",
+                        (CHECKPOINTER_SETUP_LOCK_KEY,),
+                    )
+                    row = await res.fetchone()
+                    if row:
+                        val = row.get("pg_try_advisory_lock") if isinstance(row, dict) else row[0]
+                        if val:
+                            acquired = True
+                            break
+                    await asyncio.sleep(0.1)
+
+                if not acquired:
+                    raise ToolExecutionException(
+                        "Timed out waiting for PostgreSQL checkpointer setup advisory lock."
+                    )
+
                 try:
                     setup_saver = AsyncPostgresSaver(conn)
                     await setup_saver.setup()
