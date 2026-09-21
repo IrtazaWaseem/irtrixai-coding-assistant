@@ -14,6 +14,7 @@ import {
   RotateCw,
   Search,
 } from "lucide-react";
+import { useTaskExecution } from "../context/TaskContext";
 import {
   createWorkspace,
   getWorkspaces,
@@ -103,6 +104,8 @@ const TreeNodeItem: React.FC<{
 };
 
 export const WorkspacesPage: React.FC = () => {
+  const { setActiveWorkspaceId } = useTaskExecution();
+
   const [workspaces, setWorkspaces] = useState<WorkspaceResponse[]>([]);
   const [selectedWorkspace, setSelectedWorkspace] =
     useState<WorkspaceResponse | null>(null);
@@ -131,6 +134,7 @@ export const WorkspacesPage: React.FC = () => {
       setWorkspaces(list);
       if (list.length > 0 && !selectedWorkspace) {
         setSelectedWorkspace(list[0]);
+        setActiveWorkspaceId(list[0].id);
       }
     } catch (err: any) {
       setPageError(err.message || "Failed to load workspaces.");
@@ -175,6 +179,7 @@ export const WorkspacesPage: React.FC = () => {
       const created = await createWorkspace(wsName.trim(), wsPath.trim());
       setWorkspaces((prev) => [created, ...prev]);
       setSelectedWorkspace(created);
+      setActiveWorkspaceId(created.id);
       setWsName("");
       setWsPath("");
       setShowRegisterForm(false);
@@ -323,7 +328,10 @@ export const WorkspacesPage: React.FC = () => {
                 return (
                   <button
                     key={ws.id}
-                    onClick={() => setSelectedWorkspace(ws)}
+                    onClick={() => {
+                      setSelectedWorkspace(ws);
+                      setActiveWorkspaceId(ws.id);
+                    }}
                     className={`w-full text-left p-3 rounded-lg border transition-all ${
                       isSelected
                         ? "bg-zinc-800/80 border-emerald-500/50 text-zinc-100 shadow-sm"

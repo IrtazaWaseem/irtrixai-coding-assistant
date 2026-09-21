@@ -157,3 +157,13 @@ export interface TaskResponse {
   final_result?: any;
   review_summary?: any;
 }
+
+export interface TerminalExecutionResponse {
+  workspace_id: string;
+  command: string;
+  exit_code: number;
+  stdout: string;
+  stderr: string;
+  truncated: boolean;
+  duration_seconds?: number | null;
+}

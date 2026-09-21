@@ -10,6 +10,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.exceptions import (
     AppException,
+    ContainerExecutionException,
+    ContainerTimeoutException,
+    DisallowedCommandException,
     EntityNotFoundException,
     FileSizeLimitExceededException,
     ProtectedFileAccessViolationException,
@@ -18,6 +21,8 @@ from app.core.exceptions import (
 )
 from app.db.session import get_db
 from app.schemas.workspace import (
+    TerminalExecuteRequest,
+    TerminalExecuteResponse,
     WorkspaceCreate,
     WorkspaceFileReadResponse,
     WorkspaceFileWriteRequest,
@@ -25,6 +30,7 @@ from app.schemas.workspace import (
     WorkspaceRead,
     WorkspaceTreeResponse,
 )
+from app.services.execution_service import ExecutionService
 from app.services.workspace_service import WorkspaceService
 from app.tools.file_tools import read_file, write_file
 from app.tools.validators import validate_safe_path, validate_workspace_dir
@@ -318,3 +324,73 @@ async def write_workspace_file_canonical(
 ) -> WorkspaceFileWriteResponse:
     workspace = await WorkspaceService.get_workspace_by_id(db, workspace_id)
     return _execute_write_file(workspace.root_path, file_path, payload, workspace.id)
+
+
+@router.post(
+    "/{workspace_id}/terminal/execute",
+    response_model=TerminalExecuteResponse,
+    summary="Execute an allowlisted command securely inside the workspace Docker sandbox",
+)
+async def execute_terminal_command(
+    workspace_id: uuid.UUID,
+    payload: TerminalExecuteRequest,
+    db: SessionDep,
+) -> TerminalExecuteResponse:
+    """Executes a validated command inside an ephemeral Docker sandbox scoped to a registered workspace."""
+    workspace = await WorkspaceService.get_workspace_by_id(db, workspace_id)
+    base_dir = validate_workspace_dir(workspace.root_path)
+
+    service = ExecutionService()
+    try:
+        result_dict = service.execute_in_sandbox(
+            command=payload.command,
+            workspace_path=base_dir,
+            timeout_seconds=settings.COMMAND_TIMEOUT_SECONDS,
+        )
+        return TerminalExecuteResponse(
+            workspace_id=workspace.id,
+            command=result_dict["command"],
+            exit_code=result_dict["exit_code"],
+            stdout=result_dict["stdout"],
+            stderr=result_dict["stderr"],
+            truncated=result_dict["truncated"],
+            duration_seconds=result_dict.get("duration_seconds"),
+        )
+    except (DisallowedCommandException, SecurityViolationException) as err:
+        logger.warning(
+            "Terminal command rejected by policy for workspace %s: %s",
+            workspace_id,
+            err,
+        )
+        raise AppException(
+            status_code=400,
+            message="Command rejected by execution policy.",
+            details={"code": "COMMAND_DISALLOWED", "reason": str(err)},
+        ) from err
+    except ContainerTimeoutException as err:
+        logger.warning("Terminal command timed out for workspace %s", workspace_id)
+        raise AppException(
+            status_code=408,
+            message=f"Command execution timed out after {settings.COMMAND_TIMEOUT_SECONDS}s.",
+            details={"code": "TIMEOUT"},
+        ) from err
+    except ContainerExecutionException as err:
+        logger.error("Terminal Docker container error for workspace %s: %s", workspace_id, err)
+        raise AppException(
+            status_code=500,
+            message="Terminal execution failed.",
+            details={"code": "CONTAINER_ERROR"},
+        ) from err
+    except AppException:
+        raise
+    except Exception as err:
+        logger.exception(
+            "Unexpected error in terminal execution for workspace %s: %s",
+            workspace_id,
+            err,
+        )
+        raise AppException(
+            status_code=500,
+            message="Terminal execution failed.",
+            details={"code": "INTERNAL_ERROR"},
+        ) from err

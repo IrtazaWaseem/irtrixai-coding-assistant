@@ -5,6 +5,7 @@ import {
   ProvidersResponse,
   SystemStatusResponse,
   TaskResponse,
+  TerminalExecutionResponse,
   WorkspaceFileResponse,
   WorkspaceFileWriteResponse,
   WorkspaceResponse,
@@ -259,4 +260,19 @@ export async function getProviders(): Promise<ProvidersResponse> {
     headers: { Accept: "application/json" },
   });
   return handleResponse<ProvidersResponse>(res);
+}
+
+export async function executeTerminalCommand(
+  workspaceId: string,
+  command: string,
+): Promise<TerminalExecutionResponse> {
+  const res = await fetch(
+    `${API_BASE}/api/v1/workspaces/${workspaceId}/terminal/execute`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ command }),
+    },
+  );
+  return handleResponse<TerminalExecutionResponse>(res);
 }

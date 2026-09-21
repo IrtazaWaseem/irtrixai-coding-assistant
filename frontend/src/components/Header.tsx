@@ -13,6 +13,8 @@ interface HeaderProps {
   status: string;
   connectionState: "connected" | "reconnecting" | "disconnected" | "idle";
   onReset: () => void;
+  isTerminalOpen?: boolean;
+  onToggleTerminal?: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -20,6 +22,8 @@ export const Header: React.FC<HeaderProps> = ({
   status,
   connectionState,
   onReset,
+  isTerminalOpen,
+  onToggleTerminal,
 }) => {
   const [backendHealthy, setBackendHealthy] = useState<boolean | null>(null);
 
@@ -70,8 +74,22 @@ export const Header: React.FC<HeaderProps> = ({
       <div className="max-w-7xl mx-auto flex items-center justify-between gap-3">
         {/* Brand & Technical Identity */}
         <div className="flex items-center gap-3 sm:gap-4 shrink-0">
-          <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-lg bg-zinc-900 border border-zinc-700/70 flex items-center justify-center text-zinc-100 shadow-inner">
+          <button
+            onClick={onToggleTerminal}
+            className="flex items-center gap-2.5 hover:opacity-90 transition-opacity text-left cursor-pointer group"
+            title={
+              isTerminalOpen
+                ? "Close Sandbox Terminal"
+                : "Open Sandbox Terminal"
+            }
+          >
+            <div
+              className={`w-8 h-8 rounded-lg border flex items-center justify-center transition-colors shadow-inner ${
+                isTerminalOpen
+                  ? "bg-emerald-950 border-emerald-500 text-emerald-300"
+                  : "bg-zinc-900 border-zinc-700/70 text-zinc-100 group-hover:border-zinc-500"
+              }`}
+            >
               <Terminal className="w-4 h-4 text-emerald-400" />
             </div>
             <div className="flex items-center">
@@ -82,7 +100,7 @@ export const Header: React.FC<HeaderProps> = ({
                 OPERATIONS CONSOLE
               </span>
             </div>
-          </div>
+          </button>
 
           {/* Backend Health Telemetry Pill */}
           <div className="hidden sm:flex items-center border-l border-zinc-800/80 pl-3 sm:pl-4">
@@ -107,6 +125,30 @@ export const Header: React.FC<HeaderProps> = ({
 
         {/* Active Task Telemetry & Actions */}
         <div className="flex items-center gap-2 sm:gap-3 shrink-0">
+          {/* Terminal Toggle Button in Action Bar */}
+          {onToggleTerminal && (
+            <button
+              onClick={onToggleTerminal}
+              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-mono font-medium border transition-colors shadow-sm cursor-pointer ${
+                isTerminalOpen
+                  ? "bg-emerald-950/60 text-emerald-300 border-emerald-600/70 shadow-emerald-950/30"
+                  : "text-zinc-300 hover:text-zinc-100 bg-zinc-900 hover:bg-zinc-800 border-zinc-800 hover:border-zinc-700"
+              }`}
+              title={
+                isTerminalOpen
+                  ? "Close Sandbox Terminal"
+                  : "Open Embedded Sandbox Terminal"
+              }
+            >
+              <Terminal
+                className={`w-3.5 h-3.5 ${
+                  isTerminalOpen ? "text-emerald-400" : "text-zinc-400"
+                }`}
+              />
+              <span className="hidden sm:inline">Terminal</span>
+            </button>
+          )}
+
           {/* Active Task Link */}
           {taskId && (
             <button

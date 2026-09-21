@@ -70,3 +70,22 @@ class WorkspaceFileWriteResponse(BaseModel):
     content_hash: str
     bytes_written: int
     is_new_file: bool
+
+
+class TerminalExecuteRequest(BaseModel):
+    command: str = Field(
+        ...,
+        min_length=1,
+        max_length=2048,
+        description="Command to execute securely inside the Docker sandbox",
+    )
+
+
+class TerminalExecuteResponse(BaseModel):
+    workspace_id: uuid.UUID
+    command: str
+    exit_code: int
+    stdout: str
+    stderr: str
+    truncated: bool
+    duration_seconds: float | None = None
