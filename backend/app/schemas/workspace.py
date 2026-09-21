@@ -14,7 +14,6 @@ class FileTreeNode(BaseModel):
     children: list[FileTreeNode] | None = None
 
 
-# Backward-compatible alias
 FileNodeSchema = FileTreeNode
 
 
@@ -51,6 +50,7 @@ class WorkspaceFileReadResponse(BaseModel):
     workspace_id: uuid.UUID
     path: str
     content: str
+    content_hash: str
     size: int
     total_lines: int
     truncated: bool = False
@@ -58,10 +58,15 @@ class WorkspaceFileReadResponse(BaseModel):
 
 class WorkspaceFileWriteRequest(BaseModel):
     content: str = Field(default="", description="Text content to write atomically")
+    expected_content_hash: str | None = Field(
+        default=None,
+        description="Expected SHA-256 hash of existing file content. Must be None if creating a new file.",
+    )
 
 
 class WorkspaceFileWriteResponse(BaseModel):
     workspace_id: uuid.UUID
     path: str
+    content_hash: str
     bytes_written: int
     is_new_file: bool

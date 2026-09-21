@@ -181,6 +181,7 @@ export const CodeWorkspace: React.FC<CodeWorkspaceProps> = ({
   const [activeFilePath, setActiveFilePath] = useState<string | null>(null);
   const [editorContent, setEditorContent] = useState<string>("");
   const [originalContent, setOriginalContent] = useState<string>("");
+  const [contentHash, setContentHash] = useState<string | null>(null);
   const [isLoadingFile, setIsLoadingFile] = useState(false);
   const [fileError, setFileError] = useState<string | null>(null);
 
@@ -188,19 +189,21 @@ export const CodeWorkspace: React.FC<CodeWorkspaceProps> = ({
   const [isSaving, setIsSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [hasConflict, setHasConflict] = useState(false);
 
   const lastLoadedWsRef = useRef<string | null>(null);
 
-  // Reset editor state when switching workspaces
   useEffect(() => {
     if (lastLoadedWsRef.current !== workspaceId) {
       setActiveFilePath(null);
       setEditorContent("");
       setOriginalContent("");
+      setContentHash(null);
       setIsDirty(false);
       setFileError(null);
       setSaveError(null);
       setSaveSuccess(false);
+      setHasConflict(false);
       lastLoadedWsRef.current = workspaceId;
     }
   }, [workspaceId]);
@@ -235,17 +238,40 @@ export const CodeWorkspace: React.FC<CodeWorkspaceProps> = ({
     setFileError(null);
     setSaveError(null);
     setSaveSuccess(false);
+    setHasConflict(false);
 
     try {
       const res = await getWorkspaceFile(workspaceId, node.path);
       setEditorContent(res.content);
       setOriginalContent(res.content);
+      setContentHash(res.content_hash);
       setIsDirty(false);
     } catch (err: any) {
       setFileError(err.message || `Failed to read ${node.path}`);
       setEditorContent("");
       setOriginalContent("");
+      setContentHash(null);
       setIsDirty(false);
+    } finally {
+      setIsLoadingFile(false);
+    }
+  };
+
+  const handleReload = async () => {
+    if (!workspaceId || !activeFilePath) return;
+    setIsLoadingFile(true);
+    setFileError(null);
+    setSaveError(null);
+    setHasConflict(false);
+
+    try {
+      const res = await getWorkspaceFile(workspaceId, activeFilePath);
+      setEditorContent(res.content);
+      setOriginalContent(res.content);
+      setContentHash(res.content_hash);
+      setIsDirty(false);
+    } catch (err: any) {
+      setFileError(err.message || `Failed to reload ${activeFilePath}`);
     } finally {
       setIsLoadingFile(false);
     }
@@ -259,17 +285,36 @@ export const CodeWorkspace: React.FC<CodeWorkspaceProps> = ({
     setSaveSuccess(false);
 
     try {
-      await saveWorkspaceFile(workspaceId, activeFilePath, editorContent);
+      const res = await saveWorkspaceFile(
+        workspaceId,
+        activeFilePath,
+        editorContent,
+        contentHash,
+      );
       setOriginalContent(editorContent);
+      setContentHash(res.content_hash);
       setIsDirty(false);
+      setHasConflict(false);
       setSaveSuccess(true);
       setTimeout(() => setSaveSuccess(false), 2500);
     } catch (err: any) {
-      setSaveError(err.message || "Failed to save file.");
+      if (err.status === 409) {
+        setHasConflict(true);
+        setSaveError("File changed on disk. Reload before saving.");
+      } else {
+        setSaveError(err.message || "Failed to save file.");
+      }
     } finally {
       setIsSaving(false);
     }
-  }, [workspaceId, activeFilePath, isDirty, isSaving, editorContent]);
+  }, [
+    workspaceId,
+    activeFilePath,
+    isDirty,
+    isSaving,
+    editorContent,
+    contentHash,
+  ]);
 
   const handleEditorMount = (editor: any, monaco: any) => {
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
@@ -307,10 +352,24 @@ export const CodeWorkspace: React.FC<CodeWorkspaceProps> = ({
             <span className="text-zinc-500 italic">Select a file to edit</span>
           )}
 
-          {isDirty && (
+          {isDirty && !hasConflict && (
             <span className="flex items-center gap-1 text-[11px] text-amber-400 font-semibold ml-2">
               ● Unsaved changes
             </span>
+          )}
+
+          {hasConflict && (
+            <div className="flex items-center gap-1.5 text-[11px] text-amber-400 font-semibold ml-2 bg-amber-950/40 px-2 py-0.5 rounded border border-amber-800/60">
+              <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+              <span>File changed on disk.</span>
+              <button
+                onClick={handleReload}
+                className="underline text-amber-200 hover:text-white font-bold ml-1 cursor-pointer"
+                title="Discard unsaved edits and reload the latest file content from disk"
+              >
+                Reload
+              </button>
+            </div>
           )}
 
           {saveSuccess && (
@@ -319,7 +378,7 @@ export const CodeWorkspace: React.FC<CodeWorkspaceProps> = ({
             </span>
           )}
 
-          {saveError && (
+          {saveError && !hasConflict && (
             <span className="flex items-center gap-1 text-[11px] text-rose-400 font-semibold ml-2">
               <AlertCircle className="w-3.5 h-3.5" /> {saveError}
             </span>
@@ -328,24 +387,36 @@ export const CodeWorkspace: React.FC<CodeWorkspaceProps> = ({
 
         <div className="flex items-center gap-2 shrink-0">
           {activeFilePath && (
-            <button
-              onClick={handleSave}
-              disabled={!isDirty || isSaving}
-              className="flex items-center gap-1 px-3 py-1 rounded text-xs font-semibold bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-40 disabled:cursor-not-allowed transition-colors shadow-sm"
-              title="Save File (Ctrl+S / Cmd+S)"
-            >
-              {isSaving ? (
-                <>
-                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                  <span>Saving...</span>
-                </>
-              ) : (
-                <>
-                  <Save className="w-3.5 h-3.5" />
-                  <span>Save</span>
-                </>
+            <>
+              {hasConflict && (
+                <button
+                  onClick={handleReload}
+                  className="flex items-center gap-1 px-2.5 py-1 rounded text-xs font-semibold bg-amber-900/60 hover:bg-amber-800 text-amber-200 border border-amber-700/60 transition-colors"
+                  title="Reload file from disk"
+                >
+                  <RotateCw className="w-3.5 h-3.5" />
+                  <span>Reload</span>
+                </button>
               )}
-            </button>
+              <button
+                onClick={handleSave}
+                disabled={!isDirty || isSaving}
+                className="flex items-center gap-1 px-3 py-1 rounded text-xs font-semibold bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-40 disabled:cursor-not-allowed transition-colors shadow-sm"
+                title="Save File (Ctrl+S / Cmd+S)"
+              >
+                {isSaving ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    <span>Saving...</span>
+                  </>
+                ) : (
+                  <>
+                    <Save className="w-3.5 h-3.5" />
+                    <span>Save</span>
+                  </>
+                )}
+              </button>
+            </>
           )}
 
           <button
@@ -358,9 +429,9 @@ export const CodeWorkspace: React.FC<CodeWorkspaceProps> = ({
         </div>
       </div>
 
-      {/* Main Two-Pane Editor Layout */}
+      {/* Main Two-Pane Layout */}
       <div className="grid grid-cols-1 md:grid-cols-12 flex-1 min-h-[500px]">
-        {/* Left: Filesystem Tree Pane */}
+        {/* Left: Directory Tree */}
         <div className="md:col-span-4 lg:col-span-3 border-r border-zinc-800/80 p-3 bg-zinc-950/40 flex flex-col space-y-2 overflow-y-auto max-h-[620px]">
           <div className="flex items-center justify-between text-[11px] font-mono text-zinc-500 border-b border-zinc-800/60 pb-1.5 px-1">
             <span className="uppercase tracking-wider font-semibold">
@@ -399,7 +470,7 @@ export const CodeWorkspace: React.FC<CodeWorkspaceProps> = ({
           )}
         </div>
 
-        {/* Right: Monaco Editor Pane */}
+        {/* Right: Monaco Editor */}
         <div className="md:col-span-8 lg:col-span-9 bg-zinc-950 flex flex-col min-h-[500px]">
           {isLoadingFile ? (
             <div className="flex-1 flex flex-col items-center justify-center text-xs font-mono text-zinc-500 space-y-2">

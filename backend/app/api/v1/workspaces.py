@@ -1,3 +1,5 @@
+import hashlib
+import logging
 import uuid
 from collections.abc import Sequence
 from typing import Annotated
@@ -25,7 +27,9 @@ from app.schemas.workspace import (
 )
 from app.services.workspace_service import WorkspaceService
 from app.tools.file_tools import read_file, write_file
-from app.tools.validators import validate_workspace_dir
+from app.tools.validators import validate_safe_path, validate_workspace_dir
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -105,102 +109,194 @@ def _execute_read_file(
             path=relative_path,
             workspace_root=base_dir,
             raise_on_error=True,
+            max_output_bytes=settings.MAX_READ_FILE_BYTES,
         )
         data = tool_res.output or {}
+        if data.get("truncated", False):
+            raise AppException(
+                status_code=413,
+                message="File exceeds the editor read limit.",
+                details={"path": relative_path, "code": "FILE_TRUNCATED"},
+            )
+
         raw_content = data.get("content", "")
+        content_hash = (
+            data.get("content_hash") or hashlib.sha256(raw_content.encode("utf-8")).hexdigest()
+        )
+
         return WorkspaceFileReadResponse(
             workspace_id=workspace_id,
             path=data.get("path", relative_path),
             content=raw_content,
+            content_hash=content_hash,
             size=len(raw_content.encode("utf-8")),
             total_lines=data.get("total_lines", 0),
-            truncated=data.get("truncated", False),
+            truncated=False,
         )
     except EntityNotFoundException as err:
         raise AppException(
             status_code=404,
             message=f"File '{relative_path}' not found in workspace.",
-            details={"path": relative_path},
+            details={"path": relative_path, "code": "FILE_NOT_FOUND"},
         ) from err
-    except (SecurityViolationException, ProtectedFileAccessViolationException) as err:
-        status_code = 403 if isinstance(err, ProtectedFileAccessViolationException) else 400
+    except ProtectedFileAccessViolationException as err:
         raise AppException(
-            status_code=status_code,
-            message=str(err),
-            details={"path": relative_path},
+            status_code=403,
+            message=f"Access denied: path '{relative_path}' is protected.",
+            details={"path": relative_path, "code": "PROTECTED_FILE"},
+        ) from err
+    except SecurityViolationException as err:
+        raise AppException(
+            status_code=400,
+            message=f"Access denied: path '{relative_path}' is outside workspace boundary.",
+            details={"path": relative_path, "code": "PATH_TRAVERSAL"},
         ) from err
     except FileSizeLimitExceededException as err:
         raise AppException(
             status_code=413,
             message=f"File exceeds maximum read limit ({settings.MAX_READ_FILE_BYTES} bytes).",
-            details={"path": relative_path},
+            details={"path": relative_path, "code": "FILE_TOO_LARGE"},
         ) from err
     except ToolExecutionException as err:
+        if "binary" in str(err).lower():
+            raise AppException(
+                status_code=400,
+                message=f"Cannot read binary file '{relative_path}' as text.",
+                details={"path": relative_path, "code": "BINARY_FILE"},
+            ) from err
+        logger.error("Tool execution error reading '%s': %s", relative_path, err)
         raise AppException(
             status_code=400,
-            message=str(err),
-            details={"path": relative_path},
+            message="Failed to read workspace file.",
+            details={"path": relative_path, "code": "READ_ERROR"},
         ) from err
+    except AppException:
+        raise
     except Exception as err:
+        logger.exception("Unhandled error reading file '%s': %s", relative_path, err)
         raise AppException(
             status_code=500,
-            message=f"Failed to read file: {err}",
-            details={"path": relative_path},
+            message="Failed to read workspace file.",
+            details={"path": relative_path, "code": "INTERNAL_ERROR"},
         ) from err
 
 
 def _execute_write_file(
-    root_path: str, relative_path: str, content: str, workspace_id: uuid.UUID
+    root_path: str,
+    relative_path: str,
+    payload: WorkspaceFileWriteRequest,
+    workspace_id: uuid.UUID,
 ) -> WorkspaceFileWriteResponse:
     try:
         base_dir = validate_workspace_dir(root_path)
+        safe_file = validate_safe_path(base_dir, relative_path, must_exist=False)
+
+        # Optimistic Concurrency Check
+        if safe_file.exists():
+            if safe_file.is_dir():
+                raise AppException(
+                    status_code=400,
+                    message="Cannot write to a directory.",
+                    details={"path": relative_path, "code": "TARGET_IS_DIRECTORY"},
+                )
+
+            if payload.expected_content_hash is None:
+                raise AppException(
+                    status_code=409,
+                    message="File already exists on disk. Expected content hash must be provided.",
+                    details={"path": relative_path, "code": "FILE_ALREADY_EXISTS"},
+                )
+
+            try:
+                current_bytes = safe_file.read_bytes()
+                current_hash = hashlib.sha256(current_bytes).hexdigest()
+            except Exception as err:
+                logger.exception(
+                    "Failed reading existing file for concurrency verification: %s",
+                    relative_path,
+                )
+                raise AppException(
+                    status_code=500,
+                    message="Failed to verify existing file state.",
+                    details={"path": relative_path, "code": "READ_CHECK_ERROR"},
+                ) from err
+
+            if current_hash != payload.expected_content_hash:
+                raise AppException(
+                    status_code=409,
+                    message="File has been modified since it was read. Reload before saving.",
+                    details={
+                        "path": relative_path,
+                        "code": "FILE_MODIFIED_SINCE_READ",
+                    },
+                )
+        else:
+            if payload.expected_content_hash is not None:
+                raise AppException(
+                    status_code=409,
+                    message="Target file does not exist. expected_content_hash must be null for new files.",
+                    details={"path": relative_path, "code": "FILE_DOES_NOT_EXIST"},
+                )
+
         tool_res = write_file(
             path=relative_path,
-            content=content,
+            content=payload.content,
             workspace_root=base_dir,
             raise_on_error=True,
         )
         data = tool_res.output or {}
+        new_content_bytes = payload.content.encode("utf-8")
+        new_hash = hashlib.sha256(new_content_bytes).hexdigest()
+
         return WorkspaceFileWriteResponse(
             workspace_id=workspace_id,
             path=data.get("path", relative_path),
-            bytes_written=data.get("bytes_written", 0),
+            content_hash=new_hash,
+            bytes_written=data.get("bytes_written", len(new_content_bytes)),
             is_new_file=data.get("is_new_file", False),
         )
-    except (SecurityViolationException, ProtectedFileAccessViolationException) as err:
-        status_code = 403 if isinstance(err, ProtectedFileAccessViolationException) else 400
+    except ProtectedFileAccessViolationException as err:
         raise AppException(
-            status_code=status_code,
-            message=str(err),
-            details={"path": relative_path},
+            status_code=403,
+            message=f"Access denied: path '{relative_path}' is protected.",
+            details={"path": relative_path, "code": "PROTECTED_FILE"},
+        ) from err
+    except SecurityViolationException as err:
+        raise AppException(
+            status_code=400,
+            message=f"Access denied: path '{relative_path}' is outside workspace boundary.",
+            details={"path": relative_path, "code": "PATH_TRAVERSAL"},
         ) from err
     except FileSizeLimitExceededException as err:
         raise AppException(
             status_code=413,
-            message=f"File content exceeds maximum allowed write size ({settings.MAX_READ_FILE_BYTES} bytes).",
-            details={"path": relative_path},
+            message=f"File content exceeds maximum allowed write size ({settings.MAX_WRITE_FILE_BYTES} bytes).",
+            details={"path": relative_path, "code": "PAYLOAD_TOO_LARGE"},
         ) from err
     except ToolExecutionException as err:
+        logger.error("Tool execution error writing '%s': %s", relative_path, err)
         raise AppException(
             status_code=400,
-            message=str(err),
-            details={"path": relative_path},
+            message="Failed to write workspace file.",
+            details={"path": relative_path, "code": "WRITE_ERROR"},
         ) from err
+    except AppException:
+        raise
     except Exception as err:
+        logger.exception("Unhandled error writing file '%s': %s", relative_path, err)
         raise AppException(
             status_code=500,
-            message=f"Failed to write file: {err}",
-            details={"path": relative_path},
+            message="Failed to write workspace file.",
+            details={"path": relative_path, "code": "INTERNAL_ERROR"},
         ) from err
 
 
-# File read: path parameter
 @router.get(
     "/{workspace_id}/files/{file_path:path}",
     response_model=WorkspaceFileReadResponse,
-    summary="Read a workspace file by path",
+    summary="Read a workspace file by relative path",
 )
-async def read_workspace_file_path(
+async def read_workspace_file_canonical(
     workspace_id: uuid.UUID,
     file_path: str,
     db: SessionDep,
@@ -209,48 +305,16 @@ async def read_workspace_file_path(
     return _execute_read_file(workspace.root_path, file_path, workspace.id)
 
 
-# File read: query parameter
-@router.get(
-    "/{workspace_id}/file",
-    response_model=WorkspaceFileReadResponse,
-    summary="Read a workspace file via query param",
-)
-async def read_workspace_file_query(
-    workspace_id: uuid.UUID,
-    path: Annotated[str, Query(min_length=1, description="Workspace-relative file path")],
-    db: SessionDep,
-) -> WorkspaceFileReadResponse:
-    workspace = await WorkspaceService.get_workspace_by_id(db, workspace_id)
-    return _execute_read_file(workspace.root_path, path, workspace.id)
-
-
-# File write: path parameter
 @router.put(
     "/{workspace_id}/files/{file_path:path}",
     response_model=WorkspaceFileWriteResponse,
-    summary="Write or save a workspace file by path",
+    summary="Write or save a workspace file with optimistic concurrency",
 )
-async def write_workspace_file_path(
+async def write_workspace_file_canonical(
     workspace_id: uuid.UUID,
     file_path: str,
     payload: WorkspaceFileWriteRequest,
     db: SessionDep,
 ) -> WorkspaceFileWriteResponse:
     workspace = await WorkspaceService.get_workspace_by_id(db, workspace_id)
-    return _execute_write_file(workspace.root_path, file_path, payload.content, workspace.id)
-
-
-# File write: query parameter
-@router.put(
-    "/{workspace_id}/file",
-    response_model=WorkspaceFileWriteResponse,
-    summary="Write or save a workspace file via query param",
-)
-async def write_workspace_file_query(
-    workspace_id: uuid.UUID,
-    path: Annotated[str, Query(min_length=1, description="Workspace-relative file path")],
-    payload: WorkspaceFileWriteRequest,
-    db: SessionDep,
-) -> WorkspaceFileWriteResponse:
-    workspace = await WorkspaceService.get_workspace_by_id(db, workspace_id)
-    return _execute_write_file(workspace.root_path, path, payload.content, workspace.id)
+    return _execute_write_file(workspace.root_path, file_path, payload, workspace.id)

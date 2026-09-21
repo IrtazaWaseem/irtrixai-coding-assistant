@@ -1,5 +1,6 @@
 import contextlib
 import fnmatch
+import hashlib
 import os
 import re
 import uuid
@@ -24,7 +25,6 @@ from app.tools.schemas import (
     WriteFileOutput,
 )
 from app.tools.validators import (
-    truncate_output,
     validate_content_size,
     validate_file_size,
     validate_not_protected,
@@ -66,9 +66,7 @@ def list_files(
         target_dir = validate_safe_path(base_dir, relative_directory, must_exist=True)
 
         if not target_dir.is_dir():
-            raise ToolExecutionException(
-                f"Path '{relative_directory}' is not a directory."
-            )
+            raise ToolExecutionException(f"Path '{relative_directory}' is not a directory.")
 
         effective_max_depth = max_depth if recursive else 1
         entries: list[FileEntry] = []
@@ -102,9 +100,7 @@ def list_files(
                     continue
 
                 try:
-                    safe_child = validate_safe_path(
-                        base_dir, item.path, must_exist=False
-                    )
+                    safe_child = validate_safe_path(base_dir, item.path, must_exist=False)
                     if is_protected_file(safe_child):
                         continue
                 except SecurityViolationException:
@@ -114,18 +110,14 @@ def list_files(
                 rel_path = str(safe_child.relative_to(base_dir)).replace("\\", "/")
 
                 if item.is_dir(follow_symlinks=False):
-                    entries.append(
-                        FileEntry(name=item.name, path=rel_path, type="directory")
-                    )
+                    entries.append(FileEntry(name=item.name, path=rel_path, type="directory"))
                     if recursive and depth < effective_max_depth:
                         _walk(safe_child, depth + 1)
                 elif item.is_file(follow_symlinks=False):
                     size = None
                     with contextlib.suppress(OSError):
                         size = item.stat().st_size
-                    entries.append(
-                        FileEntry(name=item.name, path=rel_path, type="file", size=size)
-                    )
+                    entries.append(FileEntry(name=item.name, path=rel_path, type="file", size=size))
 
         _walk(target_dir, depth=1)
 
@@ -145,6 +137,7 @@ def read_file(
     end_line: int | None = None,
     workspace_root: str | Path | None = None,
     raise_on_error: bool = False,
+    max_output_bytes: int | None = None,
 ) -> ToolResult:
     """Reads a text file with line range pagination, binary detection, and size limits."""
     try:
@@ -160,17 +153,15 @@ def read_file(
         with safe_file.open("rb") as f:
             header = f.read(8192)
             if b"\x00" in header:
-                raise ToolExecutionException(
-                    f"Cannot read binary file '{path}' as text."
-                )
+                raise ToolExecutionException(f"Cannot read binary file '{path}' as text.")
 
+        raw_bytes = safe_file.read_bytes()
         try:
-            raw_text = safe_file.read_text(encoding="utf-8")
+            raw_text = raw_bytes.decode("utf-8")
         except UnicodeDecodeError as err:
-            raise ToolExecutionException(
-                f"File '{path}' is not valid UTF-8 text: {err}"
-            ) from err
+            raise ToolExecutionException(f"File '{path}' is not valid UTF-8 text: {err}") from err
 
+        file_hash = hashlib.sha256(raw_bytes).hexdigest()
         all_lines = raw_text.splitlines()
         total_lines = len(all_lines)
         rel_path = str(safe_file.relative_to(base_dir)).replace("\\", "/")
@@ -185,7 +176,9 @@ def read_file(
                 truncated=False,
                 has_more=False,
             )
-            return ToolResult.ok(tool_name="read_file", output=result_data.model_dump())
+            out = result_data.model_dump()
+            out["content_hash"] = file_hash
+            return ToolResult.ok(tool_name="read_file", output=out)
 
         if start_line is not None and start_line < 1:
             raise ToolExecutionException(f"start_line ({start_line}) must be >= 1.")
@@ -196,26 +189,48 @@ def read_file(
                 f"start_line ({start_line}) cannot be greater than end_line ({end_line})."
             )
 
-        start_idx = (start_line - 1) if start_line is not None else 0
-        end_idx = end_line if end_line is not None else total_lines
+        # Preserve exact file contents (including trailing newlines) for unpaginated reads
+        if start_line is None and end_line is None:
+            sliced_content = raw_text
+            start_num = 1 if total_lines > 0 else 0
+            end_num = total_lines
+        else:
+            start_idx = (start_line - 1) if start_line is not None else 0
+            end_idx = end_line if end_line is not None else total_lines
 
-        start_idx = max(0, min(start_idx, total_lines))
-        end_idx = max(start_idx, min(end_idx, total_lines))
+            start_idx = max(0, min(start_idx, total_lines))
+            end_idx = max(start_idx, min(end_idx, total_lines))
 
-        sliced_lines = all_lines[start_idx:end_idx]
-        sliced_content = "\n".join(sliced_lines)
-        final_content, was_truncated = truncate_output(sliced_content)
+            sliced_lines = all_lines[start_idx:end_idx]
+            sliced_content = "\n".join(sliced_lines)
+            start_num = start_idx + 1 if total_lines > 0 else 0
+            end_num = end_idx
+
+        # Bounded output limit: default is MAX_TOOL_OUTPUT_BYTES, IDE can pass MAX_READ_FILE_BYTES
+        effective_output_limit = (
+            max_output_bytes if max_output_bytes is not None else settings.MAX_TOOL_OUTPUT_BYTES
+        )
+
+        encoded_slice = sliced_content.encode("utf-8")
+        if len(encoded_slice) > effective_output_limit:
+            final_content = encoded_slice[:effective_output_limit].decode("utf-8", errors="ignore")
+            was_truncated = True
+        else:
+            final_content = sliced_content
+            was_truncated = False
 
         result_data = ReadFileOutput(
             path=rel_path,
             content=final_content,
-            start_line=start_idx + 1 if total_lines > 0 else 0,
-            end_line=end_idx,
+            start_line=start_num,
+            end_line=end_num,
             total_lines=total_lines,
             truncated=was_truncated,
-            has_more=(end_idx < total_lines) or was_truncated,
+            has_more=(end_num < total_lines) or was_truncated,
         )
-        return ToolResult.ok(tool_name="read_file", output=result_data.model_dump())
+        out = result_data.model_dump()
+        out["content_hash"] = file_hash
+        return ToolResult.ok(tool_name="read_file", output=out)
     except Exception as err:  # noqa: BLE001
         return _handle_tool_error("read_file", err, raise_on_error)
 
@@ -236,9 +251,7 @@ def search_code(
         target_dir = validate_safe_path(base_dir, relative_path, must_exist=True)
 
         if not target_dir.is_dir():
-            raise ToolExecutionException(
-                f"Search path '{relative_path}' is not a directory."
-            )
+            raise ToolExecutionException(f"Search path '{relative_path}' is not a directory.")
 
         max_matches = settings.MAX_SEARCH_RESULTS
         max_file_size = settings.MAX_SEARCH_FILE_SIZE
@@ -265,9 +278,7 @@ def search_code(
                 raw_file_path = Path(root) / file
 
                 try:
-                    safe_file = validate_safe_path(
-                        base_dir, raw_file_path, must_exist=True
-                    )
+                    safe_file = validate_safe_path(base_dir, raw_file_path, must_exist=True)
                 except (
                     SecurityViolationException,
                     EntityNotFoundException,
@@ -338,7 +349,7 @@ def write_file(
             )
 
         byte_length = validate_content_size(
-            content, max_bytes=settings.MAX_READ_FILE_BYTES, field_name="content"
+            content, max_bytes=settings.MAX_WRITE_FILE_BYTES, field_name="content"
         )
 
         safe_file.parent.mkdir(parents=True, exist_ok=True)
@@ -346,7 +357,8 @@ def write_file(
 
         temp_file = safe_file.parent / f".tmp_{uuid.uuid4().hex}"
         try:
-            temp_file.write_text(content, encoding="utf-8")
+            # newline="" prevents Windows CRLF (\r\n) translation, keeping SHA-256 byte-exact
+            temp_file.write_text(content, encoding="utf-8", newline="")
 
             # TOCTOU mitigation: Re-verify boundary containment and target identity
             rechecked_path = validate_safe_path(base_dir, path, must_exist=False)
@@ -406,9 +418,7 @@ def apply_patch(
             )
             matches = list(block_pattern.finditer(patch_content))
             if not matches:
-                raise ToolExecutionException(
-                    "Malformed search-and-replace patch structure."
-                )
+                raise ToolExecutionException("Malformed search-and-replace patch structure.")
 
             current_text = original_content
             for idx, match in enumerate(matches, start=1):
@@ -478,9 +488,7 @@ def apply_patch(
                 _commit_hunk(hunk_lines)
 
             res_lines.extend(orig_lines[line_cursor:])
-            new_content = newline.join(res_lines) + (
-                newline if ends_with_newline else ""
-            )
+            new_content = newline.join(res_lines) + (newline if ends_with_newline else "")
         else:
             raise ToolExecutionException(
                 "Unrecognized patch format. Provide unified diff (@@) or search-replace blocks."

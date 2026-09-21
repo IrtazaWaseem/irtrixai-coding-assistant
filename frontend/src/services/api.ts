@@ -220,6 +220,7 @@ export async function saveWorkspaceFile(
   workspaceId: string,
   relativePath: string,
   content: string,
+  expectedContentHash?: string | null,
 ): Promise<WorkspaceFileWriteResponse> {
   const cleanPath = relativePath.replace(/^\/+/, "");
   const res = await fetch(
@@ -227,7 +228,10 @@ export async function saveWorkspaceFile(
     {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ content }),
+      body: JSON.stringify({
+        content,
+        expected_content_hash: expectedContentHash ?? null,
+      }),
     },
   );
   return handleResponse<WorkspaceFileWriteResponse>(res);

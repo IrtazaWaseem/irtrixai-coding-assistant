@@ -74,6 +74,7 @@ export interface WorkspaceFileResponse {
   workspace_id: string;
   path: string;
   content: string;
+  content_hash: string;
   size: number;
   total_lines: number;
   truncated: boolean;
@@ -82,6 +83,7 @@ export interface WorkspaceFileResponse {
 export interface WorkspaceFileWriteResponse {
   workspace_id: string;
   path: string;
+  content_hash: string;
   bytes_written: number;
   is_new_file: boolean;
 }

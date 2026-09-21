@@ -56,9 +56,11 @@ class Settings(BaseSettings):
     LLM_THINKING_LEVEL: str = "low"
 
     # Workspace & Tool Limits
+    # Workspace & Tool Limits
     WORKSPACE_BASE_PATH: Path = Path("./workspaces").resolve()
     MAX_WORKSPACE_DEPTH: int = 5
     MAX_READ_FILE_BYTES: int = 1_048_576  # 1MB
+    MAX_WRITE_FILE_BYTES: int = 1_048_576  # 1MB
     MAX_TOOL_OUTPUT_BYTES: int = 51_200  # 50KB
     MAX_SEARCH_RESULTS: int = 100
     MAX_SEARCH_FILE_SIZE: int = 524_288  # 500KB
