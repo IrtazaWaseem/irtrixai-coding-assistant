@@ -305,13 +305,11 @@ def _resolve_workspace_target(
 
     clean_target = target.replace("\\", "/").strip().lstrip("/")
 
-    # 1. Exact relative path exists on disk
     if clean_target and (workspace_root / clean_target).is_file():
         return clean_target
 
     candidates = [f.replace("\\", "/").strip().lstrip("/") for f in (files_changed or []) if f]
 
-    # 2. Match against declared files_changed
     if clean_target:
         for c in candidates:
             if (workspace_root / c).is_file():
@@ -323,18 +321,15 @@ def _resolve_workspace_target(
                 ):
                     return c
 
-    # 3. Match filename in workspace root
     if clean_target:
         fname = Path(clean_target).name
         if (workspace_root / fname).is_file():
             return fname
 
-    # 4. If target was empty/unknown but candidates exist, pick first existing candidate
     for c in candidates:
         if (workspace_root / c).is_file():
             return c
 
-    # 5. Fallback to first candidate if specified, else clean_target
     if candidates:
         return candidates[0]
 
@@ -345,7 +340,6 @@ def split_unified_diff(patch_text: str) -> list[tuple[str, str]]:
     if not patch_text or not patch_text.strip():
         return []
 
-    # Strip markdown code blocks if the model wrapped the diff
     cleaned = patch_text.strip()
     if cleaned.startswith("```"):
         lines_raw = cleaned.splitlines()
@@ -519,7 +513,6 @@ async def inspect_workspace(state: AgentState) -> dict[str, Any]:
         except Exception as read_err:
             logger.debug("Manifest read skipped: %s", read_err)
 
-    # Provider-aware workspace summary limit
     max_summary_bytes = settings.MAX_TOOL_OUTPUT_BYTES
     if state.get("provider") == "ollama":
         max_summary_bytes = getattr(settings, "OLLAMA_MAX_WORKSPACE_SUMMARY_BYTES", 12_000)
@@ -546,7 +539,6 @@ async def repository_context(
     ws_summary = state.get("workspace_summary")
     tech_stack = state.get("tech_stack", [])
 
-    # Provider-aware context bounding
     is_ollama = state.get("provider") == "ollama"
     max_files = settings.OLLAMA_MAX_CONTEXT_FILES if is_ollama else settings.MAX_CONTEXT_FILES
     max_file_bytes = (
@@ -1071,8 +1063,6 @@ async def reviewer(state: AgentState, config: RunnableConfig | None = None) -> d
     files_changed_val = _get_val(coder_prop, "files_changed", [])
     files_touched = ", ".join(files_changed_val) if files_changed_val else "None"
 
-    prior_error = state.get("error")
-
     prompt = (
         f"Authoritative Test Status: {'PASSED' if test_passed else 'FAILED / UNVERIFIED'}\n"
         f"Test Output:\n{test_output}\n\n"
@@ -1083,7 +1073,6 @@ async def reviewer(state: AgentState, config: RunnableConfig | None = None) -> d
     )
 
     try:
-        # Reviewer fails fast without hanging on fallback
         try:
             review = await gateway.generate_structured(
                 prompt=prompt,
@@ -1123,14 +1112,14 @@ async def reviewer(state: AgentState, config: RunnableConfig | None = None) -> d
             "review_advisory": None,
             "token_usage": updated_usage,
             "current_step": 7,
-            "error": prior_error,
+            "error": None,
         }
     except Exception as err:
         from app.core.exceptions import LLMRateLimitException
 
         clean_err = sanitize_error_message(err)
-        # Graceful Degradation ONLY if tests passed AND no prior unrecovered node error
-        if test_passed and not prior_error:
+        # Graceful degradation if tests passed AND a valid coder proposal exists
+        if test_passed and state.get("coder_proposal") is not None:
             is_rate_limit = (
                 isinstance(err, LLMRateLimitException)
                 or "429" in clean_err
@@ -1158,7 +1147,7 @@ async def reviewer(state: AgentState, config: RunnableConfig | None = None) -> d
                 "error": None,
             }
 
-        failure_msg = prior_error or f"Reviewer failed: {clean_err}"
+        failure_msg = f"Reviewer failed: {clean_err}"
         logger.error("Node [reviewer] review generation failed: %s", failure_msg)
         return {
             "error": failure_msg,
@@ -1291,12 +1280,10 @@ async def apply_approved_patch(state: AgentState) -> dict[str, Any]:
     coder_prop = state.get("coder_proposal")
     files_changed = _get_val(coder_prop, "files_changed", []) or []
 
-    # Discard any chunk with an invalid or dummy target like 'unknown.py'
     valid_chunks = [
         (t, c) for t, c in chunks if t and t.lower() not in ("unknown.py", "none", "/dev/null")
     ]
 
-    # If diff parser yielded no valid chunks, use declared files_changed
     if not valid_chunks:
         if files_changed:
             if len(files_changed) == 1:
@@ -1331,7 +1318,6 @@ async def apply_approved_patch(state: AgentState) -> dict[str, Any]:
             "current_step": 4,
         }
 
-    # Resolve target paths against actual repository files
     resolved_chunks: list[tuple[str, str]] = []
     for target, chunk_content in chunks:
         resolved_target = _resolve_workspace_target(target, resolved_ws, files_changed)

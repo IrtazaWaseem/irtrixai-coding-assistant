@@ -37,7 +37,6 @@ class OllamaProvider(LLMProvider):
             raise LLMInvalidModelException("Ollama model ID cannot be empty.")
         self.base_url = (config.base_url or "http://localhost:11434").rstrip("/")
         self._injected_client = client
-        # Default to 180s timeout for local LLM prompt ingestion & cold loads
         self._timeout = max(float(self.config.timeout_seconds or 60.0), 180.0)
 
     @property
@@ -56,7 +55,7 @@ class OllamaProvider(LLMProvider):
         temperature: float | None = None,
         max_output_tokens: int | None = None,
         stream: bool = False,
-        format_spec: str | dict[str, Any] | None = None,
+        format_json: bool = False,
     ) -> dict[str, Any]:
         messages: list[dict[str, str]] = []
         if system_instruction and system_instruction.strip():
@@ -76,8 +75,8 @@ class OllamaProvider(LLMProvider):
         }
         if options:
             payload["options"] = options
-        if format_spec is not None:
-            payload["format"] = format_spec
+        if format_json:
+            payload["format"] = "json"
 
         return payload
 
@@ -115,6 +114,7 @@ class OllamaProvider(LLMProvider):
             temperature=temperature,
             max_output_tokens=max_output_tokens,
             stream=False,
+            format_json=False,
         )
         url = f"{self.base_url}/api/chat"
 
@@ -182,7 +182,7 @@ class OllamaProvider(LLMProvider):
             temperature=temperature,
             max_output_tokens=effective_max_tokens,
             stream=False,
-            format_spec=schema_dict,
+            format_json=True,
         )
         url = f"{self.base_url}/api/chat"
 
@@ -244,6 +244,7 @@ class OllamaProvider(LLMProvider):
             temperature=temperature,
             max_output_tokens=max_output_tokens,
             stream=True,
+            format_json=False,
         )
         url = f"{self.base_url}/api/chat"
 
