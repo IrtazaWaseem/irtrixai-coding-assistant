@@ -18,12 +18,12 @@ from app.agent.nodes import (
     test_runner,
 )
 from app.agent.state import MAX_REPAIR_ITERATIONS, AgentState
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
 
 def route_after_approval(state: AgentState) -> str:
-    # If an upstream error occurred (e.g. Coder 429/schema failure), abort to finalize immediately
     if state.get("error"):
         return "finalize"
 
@@ -48,6 +48,19 @@ def route_after_test(state: AgentState) -> str:
     if test_passed:
         return "reviewer"
 
+    # Circuit Breaker 1: Hard Token Budget Guard
+    usage = state.get("token_usage") or {}
+    total_tokens = int(usage.get("total_tokens", 0) or 0)
+    max_budget = getattr(settings, "MAX_TASK_TOKEN_BUDGET", 30_000)
+    if total_tokens >= max_budget:
+        logger.warning(
+            "Token budget ceiling reached (%d >= %d). Halting repair loop to finalize.",
+            total_tokens,
+            max_budget,
+        )
+        return "finalize"
+
+    # Circuit Breaker 2: Max Repair Iteration Guard
     repair_count = state.get("repair_count", 0)
     if repair_count >= MAX_REPAIR_ITERATIONS:
         logger.warning(

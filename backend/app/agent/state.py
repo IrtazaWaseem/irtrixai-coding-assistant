@@ -1,6 +1,7 @@
 from pathlib import Path
 from typing import Any, TypedDict
 
+from app.core.config import settings
 from app.schemas.agent_contracts import (
     CoderOutput,
     DebuggerOutput,
@@ -9,7 +10,7 @@ from app.schemas.agent_contracts import (
     ReviewerOutput,
 )
 
-MAX_REPAIR_ITERATIONS = 3
+MAX_REPAIR_ITERATIONS = getattr(settings, "MAX_REPAIR_ITERATIONS", 3)
 
 SENSITIVE_KEY_TERMS = (
     "api_key",
@@ -97,16 +98,13 @@ def create_initial_state(
 
 
 def validate_state_invariants(state: AgentState | dict[str, Any]) -> bool:
-    """Validates critical security, graph, and thread state invariants."""
     if not isinstance(state, dict):
         raise ValueError("State must be a dictionary or Mapping.")
 
-    # 1. Thread Invariants
     thread_id = state.get("thread_id")
     if not thread_id or not isinstance(thread_id, str) or not thread_id.strip():
         raise ValueError("thread_id must be non-empty.")
 
-    # 2. Task & Workspace Identity Invariants
     task_id = state.get("task_id")
     if not task_id or not isinstance(task_id, str) or not task_id.strip():
         raise ValueError("task_id must be non-empty.")
@@ -135,7 +133,6 @@ def validate_state_invariants(state: AgentState | dict[str, Any]) -> bool:
         if isinstance(v, str) and any(term in v.lower() for term in ("aizasy", "bearer ")):
             raise ValueError(f"Security violation: state contains sensitive secret in '{k}'.")
 
-    # 3. Repair Count Governance
     repair_count = state.get("repair_count", 0)
     if not isinstance(repair_count, int) or isinstance(repair_count, bool):
         raise ValueError("repair_count must be an integer.")
@@ -146,7 +143,6 @@ def validate_state_invariants(state: AgentState | dict[str, Any]) -> bool:
             f"repair_count ({repair_count}) exceeds MAX_REPAIR_ITERATIONS ({MAX_REPAIR_ITERATIONS})."
         )
 
-    # 4. Security & Patch Authorization Invariant
     applied_diff = state.get("applied_diff")
     approval = state.get("approval")
     if applied_diff and approval is not True:
@@ -157,7 +153,6 @@ def validate_state_invariants(state: AgentState | dict[str, Any]) -> bool:
     if approval is not None and not isinstance(approval, bool):
         raise ValueError("approval must be a boolean or None.")
 
-    # 5. Step boundary invariant
     current_step = state.get("current_step", 0)
     if (
         current_step is not None

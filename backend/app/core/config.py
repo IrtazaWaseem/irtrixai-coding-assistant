@@ -36,7 +36,7 @@ class Settings(BaseSettings):
     )
     TEST_DATABASE_URL: str | None = None
 
-    # LLM Providers & Gateway Configuration (Ollama default allows CI tests to run without API keys)
+    # LLM Providers & Gateway Configuration
     PRIMARY_LLM_PROVIDER: str = "ollama"
     PRIMARY_LLM_MODEL: str = "qwen2.5vl:7b"
     FALLBACK_LLM_PROVIDER: str | None = None
@@ -49,11 +49,15 @@ class Settings(BaseSettings):
     GROQ_MODEL: str = "openai/gpt-oss-120b"
 
     OLLAMA_BASE_URL: str = "http://localhost:11434"
-    OLLAMA_MODEL: str = "qwen2.5vl:7b"
+    OLLAMA_MODEL: str = "qwen2.5-coder:7b"
 
     LLM_REQUEST_TIMEOUT_SECONDS: int = 180
     LLM_MAX_RETRIES: int = 3
     LLM_THINKING_LEVEL: str = "low"
+
+    # Agent Loop & Governance Caps
+    MAX_REPAIR_ITERATIONS: int = 3
+    MAX_TASK_TOKEN_BUDGET: int = 35_000
 
     # Workspace & Tool Limits
     WORKSPACE_BASE_PATH: Path = Path("./workspaces").resolve()
@@ -73,7 +77,7 @@ class Settings(BaseSettings):
     MAX_EXCERPT_LINES: int = 80
     MAX_CANDIDATE_FILES: int = 1_000
 
-    # Ollama Local Bounded Context Limits (Phase 13A-8)
+    # Ollama Local Bounded Context Limits
     OLLAMA_MAX_CONTEXT_FILES: int = 4
     OLLAMA_MAX_FILE_CONTEXT_BYTES: int = 4_000
     OLLAMA_MAX_TOTAL_CONTEXT_BYTES: int = 12_000
@@ -81,7 +85,7 @@ class Settings(BaseSettings):
     OLLAMA_MAX_WORKSPACE_SUMMARY_BYTES: int = 12_000
     OLLAMA_MAX_OUTPUT_TOKENS: int = 8_192
 
-    # LangSmith Observability (Phase 13A-8: Opt-In)
+    # LangSmith Observability
     LANGSMITH_TRACING: bool = False
     LANGSMITH_API_KEY: str = ""
     LANGSMITH_PROJECT: str = "irtrixai"
@@ -106,13 +110,11 @@ class Settings(BaseSettings):
 
     @property
     def postgres_uri(self) -> str:
-        """Returns standard PostgreSQL URI without dialect prefix for psycopg/checkpoint savers."""
         user = quote_plus(self.POSTGRES_USER)
         password = quote_plus(self.POSTGRES_PASSWORD)
         return f"postgresql://{user}:{password}@{self.POSTGRES_SERVER}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
 
     def get_provider_default_model(self, provider: str) -> str:
-        """Resolves the default model identifier for a given provider."""
         prov = provider.strip().lower()
         if prov == "ollama":
             return self.OLLAMA_MODEL
@@ -123,7 +125,6 @@ class Settings(BaseSettings):
         return ""
 
     def get_provider_credentials(self, provider: str) -> tuple[str | None, str | None]:
-        """Resolves (api_key, base_url) for the specified provider."""
         prov = provider.strip().lower()
         if prov == "ollama":
             return None, self.OLLAMA_BASE_URL
@@ -134,7 +135,6 @@ class Settings(BaseSettings):
         return None, None
 
     def get_primary_llm_config(self) -> "LLMConfig":
-        """Builds authoritative LLMConfig for the primary provider."""
         from app.schemas.llm import LLMConfig
 
         prov = self.PRIMARY_LLM_PROVIDER.strip().lower()
@@ -156,7 +156,6 @@ class Settings(BaseSettings):
         )
 
     def get_fallback_llm_config(self) -> "LLMConfig | None":
-        """Builds authoritative LLMConfig for the optional fallback provider."""
         from app.schemas.llm import LLMConfig
 
         if not self.FALLBACK_LLM_PROVIDER or not self.FALLBACK_LLM_PROVIDER.strip():

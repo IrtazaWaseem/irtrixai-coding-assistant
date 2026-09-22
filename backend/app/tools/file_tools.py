@@ -454,13 +454,43 @@ def apply_patch(
                         expected_context.append(hl[1:])
                     elif hl.startswith("+"):
                         replacement.append(hl[1:])
+                    elif hl == "":
+                        # LLM emitted blank line without leading space
+                        expected_context.append("")
+                        replacement.append("")
 
                 block_len = len(expected_context)
                 matched_idx = -1
+
+                # 1. Exact context match
                 for idx in range(line_cursor, len(orig_lines) - block_len + 1):
                     if orig_lines[idx : idx + block_len] == expected_context:
                         matched_idx = idx
                         break
+
+                # 2. Relaxed match (ignoring trailing whitespace differences)
+                if matched_idx == -1:
+                    exp_stripped = [line.rstrip() for line in expected_context]
+                    for idx in range(line_cursor, len(orig_lines) - block_len + 1):
+                        cand_stripped = [
+                            line.rstrip() for line in orig_lines[idx : idx + block_len]
+                        ]
+                        if cand_stripped == exp_stripped:
+                            matched_idx = idx
+                            break
+
+                # 3. Leading-whitespace-relaxed match
+                if matched_idx == -1:
+                    exp_clean = [line.strip() for line in expected_context if line.strip()]
+                    for idx in range(line_cursor, len(orig_lines) - len(exp_clean) + 1):
+                        cand_clean = [
+                            line.strip()
+                            for line in orig_lines[idx : idx + len(exp_clean)]
+                            if line.strip()
+                        ]
+                        if cand_clean == exp_clean:
+                            matched_idx = idx
+                            break
 
                 if matched_idx == -1:
                     raise ToolExecutionException(
@@ -481,6 +511,9 @@ def apply_patch(
                 elif parsing_hunk:
                     if pl.startswith((" ", "-", "+")):
                         hunk_lines.append(pl)
+                    elif pl == "":
+                        # Preserve empty context lines
+                        hunk_lines.append("")
                     elif pl.startswith("\\ No newline"):
                         continue
 
