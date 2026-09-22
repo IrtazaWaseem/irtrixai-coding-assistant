@@ -79,7 +79,7 @@ class Settings(BaseSettings):
     OLLAMA_MAX_TOTAL_CONTEXT_BYTES: int = 12_000
     OLLAMA_MAX_EXCERPT_LINES: int = 60
     OLLAMA_MAX_WORKSPACE_SUMMARY_BYTES: int = 12_000
-    OLLAMA_MAX_OUTPUT_TOKENS: int = 4_096
+    OLLAMA_MAX_OUTPUT_TOKENS: int = 8_192
 
     # LangSmith Observability (Phase 13A-8: Opt-In)
     LANGSMITH_TRACING: bool = False

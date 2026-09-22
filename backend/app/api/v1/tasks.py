@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 from collections.abc import AsyncGenerator
@@ -61,9 +62,13 @@ def _build_runnable_config(task: Task) -> dict[str, Any]:
 
 
 @router.get(
-    "/analytics", response_model=TaskAnalyticsResponse, summary="Get aggregate task telemetry"
+    "/analytics",
+    response_model=TaskAnalyticsResponse,
+    summary="Get aggregate task telemetry",
 )
-async def get_task_analytics(db: AsyncSession = Depends(get_db)) -> TaskAnalyticsResponse:
+async def get_task_analytics(
+    db: AsyncSession = Depends(get_db),
+) -> TaskAnalyticsResponse:
     stmt = select(
         func.count(Task.id),
         func.coalesce(func.sum(Task.prompt_tokens), 0),
@@ -74,7 +79,6 @@ async def get_task_analytics(db: AsyncSession = Depends(get_db)) -> TaskAnalytic
     res = await db.execute(stmt)
     cnt, p_tokens, c_tokens, t_tokens, calls = res.one()
 
-    # Aggregate provider breakdown
     prov_stmt = select(Task.provider_usage).where(Task.provider_usage.isnot(None))
     prov_res = await db.execute(prov_stmt)
     by_prov: dict[str, Any] = {}
@@ -139,7 +143,6 @@ async def get_task(
     return TaskResponse.from_task(task)
 
 
-
 @router.post("/{task_id}/run", response_model=ExecutionResponse)
 async def run_task(
     task_id: str,
@@ -157,7 +160,6 @@ async def run_task(
         usage_val = snap.values.get("token_usage") if snap else None
         usage = TokenUsage(**usage_val) if usage_val else None
 
-        # If already cancelled, do not evaluate checkpoint next-steps (e.g. approval_gate)
         if task.status == TaskStatus.CANCELLED:
             return ExecutionResponse(
                 task_id=str(task.id),
@@ -213,9 +215,9 @@ async def run_task(
                 provider=task_prov,
                 model=task_model,
             )
-            await graph.ainvoke(initial_state, config=config)
+            await TaskService.run_graph_cancellable(task.id, graph, initial_state, config)
         else:
-            await graph.ainvoke(None, config=config)
+            await TaskService.run_graph_cancellable(task.id, graph, None, config)
 
         post_snap = await graph.aget_state(config)
         await TaskService.sync_runtime_metrics(db, task.id, post_snap)
@@ -225,7 +227,6 @@ async def run_task(
 
         if post_snap.next == ("approval_gate",):
             updated_task = await TaskService.update_task_status(db, task, "awaiting_approval")
-            # If cancelled in DB while graph was executing, do not return awaiting_approval
             if updated_task.status == TaskStatus.CANCELLED:
                 return ExecutionResponse(
                     task_id=str(task.id),
@@ -264,6 +265,14 @@ async def run_task(
             current_step=post_snap.values.get("current_step", 8),
             token_usage=usage,
             final_result=(final.model_dump() if hasattr(final, "model_dump") else final),
+        )
+    except asyncio.CancelledError:
+        logger.info("run_task coroutine cancelled for task '%s'", task_id)
+        reloaded_task = await TaskService.get_task(db, task_id)
+        return ExecutionResponse(
+            task_id=str(reloaded_task.id),
+            status=reloaded_task.status.value.lower(),
+            current_step=4,
         )
     except AppException:
         raise
@@ -289,7 +298,7 @@ async def submit_approval(
             raise RuntimeError("Checkpointer is not initialized.")
 
         resume_cmd = Command(resume={"approved": payload.approved, "feedback": payload.feedback})
-        await graph.ainvoke(resume_cmd, config=config)
+        await TaskService.run_graph_cancellable(task.id, graph, resume_cmd, config)
 
         post_snap = await graph.aget_state(config)
         await TaskService.sync_runtime_metrics(db, task.id, post_snap)
@@ -338,6 +347,14 @@ async def submit_approval(
             token_usage=usage,
             final_result=(final.model_dump() if hasattr(final, "model_dump") else final),
         )
+    except asyncio.CancelledError:
+        logger.info("submit_approval coroutine cancelled for task '%s'", task_id)
+        reloaded_task = await TaskService.get_task(db, task_id)
+        return ExecutionResponse(
+            task_id=str(reloaded_task.id),
+            status=reloaded_task.status.value.lower(),
+            current_step=4,
+        )
     except AppException:
         raise
     except Exception as err:
@@ -345,6 +362,7 @@ async def submit_approval(
         logger.error("Task approval error on task '%s': %s", task_id, clean_err)
         await TaskService.update_task_status(db, task, "failed", error=clean_err)
         return ExecutionResponse(task_id=str(task.id), status="failed", error=clean_err)
+
 
 def _format_sse(event: str, data: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
@@ -383,7 +401,8 @@ async def stream_task_events(
         )
         usage = snap.values.get("token_usage", {})
         yield _format_sse(
-            "task_started", {"task_id": str(task.id), "status": st, "token_usage": usage}
+            "task_started",
+            {"task_id": str(task.id), "status": st, "token_usage": usage},
         )
 
         try:
@@ -470,7 +489,6 @@ async def stream_task_events(
                     },
                 )
 
-            # Dedicated review_skipped SSE event (Requirement L)
             rev_status = snap.values.get("review_status")
             if rev_status in ("skipped_due_to_rate_limit", "skipped_due_to_llm_error"):
                 yield _format_sse(
@@ -534,6 +552,7 @@ async def stream_task_events(
             yield _format_sse("task_failed", {"error": clean_err})
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
 
 @router.post("/{task_id}/cancel", response_model=TaskResponse)
 async def cancel_task(

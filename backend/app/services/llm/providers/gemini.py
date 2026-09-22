@@ -204,6 +204,15 @@ class GeminiProvider(LLMProvider):
                 config=config,
             )
 
+            if getattr(response, "candidates", None):
+                cand = response.candidates[0]
+                finish_reason = str(getattr(cand, "finish_reason", "")).upper()
+                if "MAX_TOKENS" in finish_reason or finish_reason == "LENGTH":
+                    raise LLMResponseException(
+                        "Gemini response was truncated by the token limit (finish_reason=MAX_TOKENS); "
+                        "the output is incomplete and cannot be trusted as valid structured output."
+                    )
+
             # Extract token telemetry for structured generation (Phase 13A-8)
             if hasattr(response, "usage_metadata") and response.usage_metadata is not None:
                 usage = response.usage_metadata

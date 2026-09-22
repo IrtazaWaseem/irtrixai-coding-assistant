@@ -208,6 +208,13 @@ class OllamaProvider(LLMProvider):
             "total_tokens": p_tokens + c_tokens,
         }
 
+        done_reason = data.get("done_reason")
+        if done_reason in ("length", "max_tokens"):
+            raise LLMResponseException(
+                "Ollama response was truncated by the token limit (done_reason=length); "
+                "the output is incomplete and cannot be trusted as valid structured output."
+            )
+
         content = data.get("message", {}).get("content", "")
 
         # Defensive unwrap: if a model outputs {"properties": {...}}, extract the values

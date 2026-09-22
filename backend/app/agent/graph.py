@@ -23,6 +23,10 @@ logger = logging.getLogger(__name__)
 
 
 def route_after_approval(state: AgentState) -> str:
+    # If an upstream error occurred (e.g. Coder 429/schema failure), abort to finalize immediately
+    if state.get("error"):
+        return "finalize"
+
     approval = state.get("approval")
     feedback = state.get("feedback")
 
@@ -56,7 +60,7 @@ def route_after_test(state: AgentState) -> str:
 
 
 def build_agent_graph(checkpointer: BaseCheckpointSaver | None = None):
-    """Constructs the canonical 10-node agent graph with Day 9 repository intelligence."""
+    """Constructs the canonical 10-node agent graph with repository intelligence."""
     builder = StateGraph(AgentState)
 
     # Canonical 10 Nodes

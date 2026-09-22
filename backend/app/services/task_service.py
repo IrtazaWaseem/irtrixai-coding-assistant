@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import uuid
 from datetime import UTC, datetime
@@ -16,7 +17,66 @@ from app.tools.validators import validate_workspace_dir
 logger = logging.getLogger(__name__)
 
 
+class TaskExecutionRegistry:
+    """Process-local registry tracking active asyncio.Task instances for running LangGraph executions.
+
+    NOTE: This registry is per-process only. In a multi-worker deployment, a cancel request
+    handled by a different worker than the one running the task will not find it in this
+    process's registry and will fall back to DB-row cancellation. Cross-process cancellation
+    signaling (e.g. Postgres LISTEN/NOTIFY or Redis pub/sub) is a planned follow-up.
+    """
+
+    def __init__(self) -> None:
+        self._tasks: dict[str, asyncio.Task[Any]] = {}
+        self._lock = asyncio.Lock()
+
+    async def register(self, task_id: str, task: asyncio.Task[Any]) -> None:
+        async with self._lock:
+            self._tasks[str(task_id)] = task
+
+    async def unregister(self, task_id: str, task: asyncio.Task[Any]) -> None:
+        async with self._lock:
+            key = str(task_id)
+            if self._tasks.get(key) is task:
+                self._tasks.pop(key, None)
+
+    async def cancel(self, task_id: str) -> bool:
+        async with self._lock:
+            key = str(task_id)
+            t = self._tasks.get(key)
+            if t is not None and not t.done():
+                t.cancel()
+                return True
+            return False
+
+    async def is_running(self, task_id: str) -> bool:
+        async with self._lock:
+            key = str(task_id)
+            t = self._tasks.get(key)
+            return t is not None and not t.done()
+
+
+task_execution_registry = TaskExecutionRegistry()
+
+
 class TaskService:
+    @staticmethod
+    async def run_graph_cancellable(
+        task_id: str | uuid.UUID,
+        graph: Any,
+        graph_input: Any,
+        config: dict[str, Any],
+    ) -> Any:
+        """Executes graph.ainvoke under the process-local cancellable task registry."""
+        tid = str(task_id)
+        coro = graph.ainvoke(graph_input, config=config)
+        future_task = asyncio.ensure_future(coro)
+        await task_execution_registry.register(tid, future_task)
+        try:
+            return await future_task
+        finally:
+            await task_execution_registry.unregister(tid, future_task)
+
     @staticmethod
     async def create_task(
         db: AsyncSession,
@@ -151,13 +211,6 @@ class TaskService:
     async def prepare_task_for_run(
         db: AsyncSession, task_id: str, graph: Any = None
     ) -> tuple[Task, bool]:
-        """Atomically locks the task row in PostgreSQL with FOR UPDATE and verifies eligibility to start execution.
-
-        Returns (task, should_execute):
-        - If should_execute is True, caller is the exclusive runner and must execute graph.
-        - If should_execute is False, task is already at approval_gate or completed.
-        - Raises AppException(409) if task is currently RUNNING or if another task is active in this workspace.
-        """
         try:
             task_uuid = uuid.UUID(task_id) if isinstance(task_id, str) else task_id
         except (ValueError, AttributeError) as err:
@@ -180,7 +233,6 @@ class TaskService:
                 message=f"Task '{task_id}' not found.",
             )
 
-        # 1. Same-task duplicate protection
         if task.status == TaskStatus.RUNNING:
             raise AppException(
                 status_code=409,
@@ -195,12 +247,10 @@ class TaskService:
             await db.commit()
             return task, False
 
-        # 2. Workspace-level concurrency protection: lock workspace row across workers
         ws_stmt = select(Workspace).where(Workspace.id == task.workspace_id).with_for_update()
         ws_res = await db.execute(ws_stmt)
         workspace = ws_res.scalar_one_or_none()
 
-        # Check for any other active task in the same physical workspace
         active_stmt = (
             select(Task)
             .options(selectinload(Task.workspace), selectinload(Task.runs))
@@ -228,7 +278,6 @@ class TaskService:
                     ),
                 )
 
-        # Transition PENDING -> RUNNING atomically under the lock
         task.status = TaskStatus.RUNNING
         if "runs" in task.__dict__ and task.runs and len(task.runs) > 0:
             task.runs[-1].status = TaskStatus.RUNNING
@@ -241,7 +290,6 @@ class TaskService:
 
     @staticmethod
     async def prepare_task_for_approval(db: AsyncSession, task_id: str) -> Task:
-        """Atomically locks task row with FOR UPDATE and verifies task is AWAITING_APPROVAL."""
         try:
             task_uuid = uuid.UUID(task_id) if isinstance(task_id, str) else task_id
         except (ValueError, AttributeError) as err:
@@ -270,12 +318,10 @@ class TaskService:
                 message=f"Task '{task_id}' is not currently awaiting human approval.",
             )
 
-        # Lock workspace row to ensure serialized access
         ws_stmt = select(Workspace).where(Workspace.id == task.workspace_id).with_for_update()
         ws_res = await db.execute(ws_stmt)
         workspace = ws_res.scalar_one_or_none()
 
-        # Verify no other task has claimed the workspace
         active_stmt = (
             select(Task)
             .options(selectinload(Task.workspace), selectinload(Task.runs))
@@ -310,7 +356,6 @@ class TaskService:
 
     @staticmethod
     async def reconcile_task_status(db: AsyncSession, task: Task, graph: Any = None) -> Task:
-        """Conservatively reconciles database Task.status against checkpointed LangGraph state."""
         if task.status in (
             TaskStatus.COMPLETED,
             TaskStatus.FAILED,
@@ -332,9 +377,6 @@ class TaskService:
 
             if not snap or not snap.values:
                 if task.status == TaskStatus.RUNNING:
-                    # If the task has an active run started within the last 5 seconds,
-                    # it is actively executing its first step and has not yet checkpointed.
-                    # Do not prematurely mark it as failed.
                     is_recently_started = False
                     if "runs" in task.__dict__ and task.runs and len(task.runs) > 0:
                         latest_run = task.runs[-1]
@@ -402,9 +444,11 @@ class TaskService:
         res = await db.execute(query)
         db_task = res.scalar_one_or_none() or task
 
-        # Invariant: Terminal states (CANCELLED, COMPLETED, FAILED) cannot be overwritten
-        # by a stale or lagging execution graph result.
-        if db_task.status in (TaskStatus.CANCELLED, TaskStatus.COMPLETED, TaskStatus.FAILED):
+        if db_task.status in (
+            TaskStatus.CANCELLED,
+            TaskStatus.COMPLETED,
+            TaskStatus.FAILED,
+        ):
             await db.commit()
             return db_task
 
@@ -442,7 +486,6 @@ class TaskService:
     async def sync_runtime_metrics(
         db: AsyncSession, task_id: str | uuid.UUID, state_or_snap: Any
     ) -> None:
-        """Idempotently syncs cumulative token telemetry from LangGraph state to Task & Run records."""
         try:
             task_uuid = uuid.UUID(str(task_id))
         except (ValueError, AttributeError):
@@ -494,7 +537,7 @@ class TaskService:
 
     @staticmethod
     async def cancel_task(db: AsyncSession, task_id: str | uuid.UUID) -> Task:
-        """Transitions an active task to CANCELLED and releases workspace locks immediately."""
+        """Transitions an active task to CANCELLED, releases workspace locks, and cancels running coroutines."""
         try:
             task_uuid = uuid.UUID(str(task_id))
         except (ValueError, AttributeError) as err:
@@ -517,8 +560,11 @@ class TaskService:
                 message=f"Task '{task_id}' not found.",
             )
 
-        # Idempotent: If already in a terminal state, return without modifying state
-        if task.status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED):
+        if task.status in (
+            TaskStatus.COMPLETED,
+            TaskStatus.FAILED,
+            TaskStatus.CANCELLED,
+        ):
             await db.commit()
             return task
 
@@ -532,4 +578,13 @@ class TaskService:
 
         db.add(task)
         await db.commit()
+
+        # Cancel any active execution coroutine registered in this process
+        found_running = await task_execution_registry.cancel(str(task.id))
+        logger.info(
+            "Task cancellation for '%s': in-flight coroutine found=%s",
+            task.id,
+            found_running,
+        )
+
         return await TaskService.get_task(db, str(task.id))

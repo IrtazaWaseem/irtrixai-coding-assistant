@@ -359,7 +359,6 @@ def split_unified_diff(patch_text: str) -> list[tuple[str, str]]:
         line_str = line.strip()
         target = ""
 
-        # Check for standard unified diff or fallback '*** Update File:' headers
         if line_str.startswith("diff --git "):
             old_line, new_line = "", ""
             for k in range(1, min(6, len(lines) - i)):
@@ -819,6 +818,7 @@ async def approval_gate(state: AgentState) -> dict[str, Any]:
             "action": "human_approval_required",
             "pending_patch": state.get("pending_patch"),
             "coder_summary": coder_summary,
+            "upstream_error": state.get("error"),
         }
         res = interrupt(interruption_payload)
 
@@ -843,11 +843,13 @@ async def test_runner(state: AgentState, config: RunnableConfig | None = None) -
     workspace_path = state.get("workspace_path", "")
     test_command = state.get("test_command") or "pytest"
 
+    # Reuse cached test_result ONLY if no unresolved error is present
     if (
         existing_result is not None
         and isinstance(existing_result, dict)
         and existing_result.get("is_stub") is False
         and state.get("applied_diff") is None
+        and not state.get("error")
     ):
         return {"test_result": existing_result, "current_step": 5}
 
@@ -1074,6 +1076,8 @@ async def reviewer(state: AgentState, config: RunnableConfig | None = None) -> d
     files_changed_val = _get_val(coder_prop, "files_changed", [])
     files_touched = ", ".join(files_changed_val) if files_changed_val else "None"
 
+    prior_error = state.get("error")
+
     prompt = (
         f"Authoritative Test Status: {'PASSED' if test_passed else 'FAILED / UNVERIFIED'}\n"
         f"Test Output:\n{test_output}\n\n"
@@ -1129,8 +1133,8 @@ async def reviewer(state: AgentState, config: RunnableConfig | None = None) -> d
         from app.core.exceptions import LLMRateLimitException
 
         clean_err = sanitize_error_message(err)
-        # Graceful degradation if tests passed AND a valid coder proposal exists
-        if test_passed and state.get("coder_proposal") is not None:
+        # Graceful degradation only when tests passed
+        if test_passed:
             is_rate_limit = (
                 isinstance(err, LLMRateLimitException)
                 or "429" in clean_err
@@ -1155,16 +1159,17 @@ async def reviewer(state: AgentState, config: RunnableConfig | None = None) -> d
                 "review_status": status_code,
                 "review_advisory": advisory,
                 "current_step": 7,
-                "error": None,
+                "error": prior_error,  # Invariant: Preserve upstream error
             }
 
-        failure_msg = f"Reviewer failed: {clean_err}"
+        failure_msg = prior_error or f"Reviewer failed: {clean_err}"
         logger.error("Node [reviewer] review generation failed: %s", failure_msg)
         return {
-            "error": failure_msg,
-            "review_status": "failed",
-            "review_advisory": clean_err,
+            "review_summary": None,
+            "review_status": status_code,
+            "review_advisory": advisory,
             "current_step": 7,
+            "error": None,
         }
 
 

@@ -215,6 +215,14 @@ class GroqProvider(LLMProvider):
         if not choices:
             raise LLMResponseException("Groq returned no choices for structured output.")
 
+        choice = choices[0]
+        finish_reason = choice.get("finish_reason")
+        if finish_reason == "length":
+            raise LLMResponseException(
+                "Groq response was truncated by the token limit (finish_reason=length); "
+                "the output is incomplete and cannot be trusted as valid structured output."
+            )
+
         usage = data.get("usage") or {}
         p_tokens = usage.get("prompt_tokens", 0) or 0
         c_tokens = usage.get("completion_tokens", 0) or 0
@@ -225,7 +233,7 @@ class GroqProvider(LLMProvider):
             "total_tokens": t_tokens,
         }
 
-        content = choices[0].get("message", {}).get("content", "")
+        content = choice.get("message", {}).get("content", "")
         return parse_structured_output(content, response_schema)
 
     async def stream(

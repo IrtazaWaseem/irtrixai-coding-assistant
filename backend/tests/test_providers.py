@@ -12,6 +12,7 @@ from app.core.exceptions import (
     LLMInvalidModelException,
     LLMProviderUnavailableException,
     LLMRateLimitException,
+    LLMResponseException,
     LLMTimeoutException,
 )
 from app.schemas.llm import LLMConfig
@@ -145,9 +146,7 @@ async def test_ollama_error_mapping():
     def timeout_handler(_: httpx.Request) -> httpx.Response:
         raise httpx.ReadTimeout("Timeout")
 
-    async with httpx.AsyncClient(
-        transport=httpx.MockTransport(timeout_handler)
-    ) as client:
+    async with httpx.AsyncClient(transport=httpx.MockTransport(timeout_handler)) as client:
         provider = OllamaProvider(config, client=client)
         with pytest.raises(LLMTimeoutException):
             await provider.generate("hi")
@@ -160,9 +159,7 @@ async def test_ollama_error_mapping():
 async def test_groq_arbitrary_model_and_auth():
     """Verifies Groq adapter accepts arbitrary model strings and enforces API key presence."""
     with pytest.raises(LLMAuthenticationException):
-        GroqProvider(
-            LLMConfig(provider="groq", model="llama-3.3-70b-versatile", api_key="")
-        )
+        GroqProvider(LLMConfig(provider="groq", model="llama-3.3-70b-versatile", api_key=""))
 
     config = LLMConfig(
         provider="groq",
@@ -205,25 +202,19 @@ async def test_groq_error_mapping():
     """Verifies Groq 401, 429, and 404 status codes map to normalized exceptions."""
     config = LLMConfig(provider="groq", model="test-model", api_key="gsk_key")
 
-    transport_401 = httpx.MockTransport(
-        lambda _: httpx.Response(401, text="Invalid API Key")
-    )
+    transport_401 = httpx.MockTransport(lambda _: httpx.Response(401, text="Invalid API Key"))
     async with httpx.AsyncClient(transport=transport_401) as client:
         provider = GroqProvider(config, client=client)
         with pytest.raises(LLMAuthenticationException):
             await provider.generate("hi")
 
-    transport_429 = httpx.MockTransport(
-        lambda _: httpx.Response(429, text="Rate limit exceeded")
-    )
+    transport_429 = httpx.MockTransport(lambda _: httpx.Response(429, text="Rate limit exceeded"))
     async with httpx.AsyncClient(transport=transport_429) as client:
         provider = GroqProvider(config, client=client)
         with pytest.raises(LLMRateLimitException):
             await provider.generate("hi")
 
-    transport_404 = httpx.MockTransport(
-        lambda _: httpx.Response(404, text="Model does not exist")
-    )
+    transport_404 = httpx.MockTransport(lambda _: httpx.Response(404, text="Model does not exist"))
     async with httpx.AsyncClient(transport=transport_404) as client:
         provider = GroqProvider(config, client=client)
         with pytest.raises(LLMInvalidModelException):
@@ -246,9 +237,7 @@ async def test_gemini_arbitrary_model_generate():
     mock_response = MagicMock()
     mock_response.text = "Generated from Gemini Flash"
     mock_response.candidates = [MagicMock(finish_reason="STOP")]
-    mock_response.usage_metadata = MagicMock(
-        prompt_token_count=10, candidates_token_count=5
-    )
+    mock_response.usage_metadata = MagicMock(prompt_token_count=10, candidates_token_count=5)
 
     mock_client = MagicMock()
     mock_client.aio.models.generate_content = AsyncMock(return_value=mock_response)
@@ -347,9 +336,7 @@ def test_gemini_error_mapping_status_code():
 @pytest.mark.asyncio
 async def test_gateway_transient_fallback_success():
     """Verifies primary transient failure falls back to secondary and records actual model."""
-    primary_config = LLMConfig(
-        provider="groq", model="llama-3.3-70b-versatile", api_key="gsk_key"
-    )
+    primary_config = LLMConfig(provider="groq", model="llama-3.3-70b-versatile", api_key="gsk_key")
     fallback_config = LLMConfig(provider="ollama", model="qwen-gpu-tuned")
 
     def groq_fail(_: httpx.Request) -> httpx.Response:
@@ -385,9 +372,7 @@ async def test_gateway_transient_fallback_success():
 @pytest.mark.asyncio
 async def test_gateway_non_transient_does_not_fallback():
     """Verifies non-transient error (e.g. 401 Auth) raises immediately without fallback."""
-    primary_config = LLMConfig(
-        provider="groq", model="llama-3.3-70b-versatile", api_key="gsk_bad"
-    )
+    primary_config = LLMConfig(provider="groq", model="llama-3.3-70b-versatile", api_key="gsk_bad")
 
     def groq_401(_: httpx.Request) -> httpx.Response:
         return httpx.Response(401, text="Unauthorized key")
@@ -421,3 +406,69 @@ def test_secrets_never_appear_in_exceptions_or_metadata():
     err_str = str(exc_info.value)
     assert secret not in err_str
     assert "[REDACTED]" in err_str
+
+
+@pytest.mark.asyncio
+async def test_groq_truncation_raises_distinct_exception():
+    """Verifies finish_reason='length' raises an explicit LLMResponseException."""
+    config = LLMConfig(provider="groq", model="test-model", api_key="gsk_key")
+
+    def handle_request(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            status_code=200,
+            json={
+                "choices": [
+                    {
+                        "message": {"content": '{"task": "Incomplete"}'},
+                        "finish_reason": "length",
+                    }
+                ],
+                "usage": {"total_tokens": 100},
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle_request)) as client:
+        provider = GroqProvider(config, client=client)
+        with pytest.raises(LLMResponseException, match="truncated by the token limit"):
+            await provider.generate_structured("Task", SampleStructuredContract)
+
+
+@pytest.mark.asyncio
+async def test_ollama_truncation_raises_distinct_exception():
+    """Verifies done_reason='length' raises an explicit LLMResponseException."""
+    config = LLMConfig(provider="ollama", model="qwen-test")
+
+    def handle_request(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            status_code=200,
+            json={
+                "model": "qwen-test",
+                "message": {"role": "assistant", "content": '{"task": "Incomplete"}'},
+                "done": True,
+                "done_reason": "length",
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle_request)) as client:
+        provider = OllamaProvider(config, client=client)
+        with pytest.raises(LLMResponseException, match="truncated by the token limit"):
+            await provider.generate_structured("Task", SampleStructuredContract)
+
+
+@pytest.mark.asyncio
+async def test_gemini_truncation_raises_distinct_exception():
+    """Verifies finish_reason='MAX_TOKENS' raises an explicit LLMResponseException."""
+    config = LLMConfig(provider="gemini", model="gemini-2.5-flash", api_key="AIzaKey")
+
+    mock_response = MagicMock()
+    mock_response.text = '{"task": "Incomplete"}'
+    mock_candidate = MagicMock()
+    mock_candidate.finish_reason = "MAX_TOKENS"
+    mock_response.candidates = [mock_candidate]
+
+    mock_client = MagicMock()
+    mock_client.aio.models.generate_content = AsyncMock(return_value=mock_response)
+
+    provider = GeminiProvider(config, client=mock_client)
+    with pytest.raises(LLMResponseException, match="truncated by the token limit"):
+        await provider.generate_structured("Task", SampleStructuredContract)

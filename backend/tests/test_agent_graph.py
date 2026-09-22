@@ -1,6 +1,7 @@
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import Command
 
 from app.agent.graph import (
@@ -159,11 +160,19 @@ def test_graph_topology_contains_required_nodes():
 
 def test_route_after_approval_logic():
     """Verifies approval gate routing logic."""
-    assert route_after_approval({"approval": True}) == "test_runner"
-    assert route_after_approval({"approval": False}) == "finalize"
     assert (
-        route_after_approval({"approval": False, "feedback": "Fix imports"}) == "coder"
+        route_after_approval({"approval": True, "pending_patch": "diff content"})
+        == "apply_approved_patch"
     )
+    assert route_after_approval({"approval": True}) == "test_runner"
+    assert (
+        route_after_approval(
+            {"approval": True, "pending_patch": "diff", "error": "Coder failed: 429"}
+        )
+        == "finalize"
+    )
+    assert route_after_approval({"approval": False}) == "finalize"
+    assert route_after_approval({"approval": False, "feedback": "Fix imports"}) == "coder"
     assert route_after_approval({"approval": None}) == "finalize"
 
 
@@ -186,10 +195,7 @@ def test_route_after_test_repair_limits():
         )
         == "finalize"
     )
-    assert (
-        route_after_test({"test_result": {"success": False}, "repair_count": 4})
-        == "finalize"
-    )
+    assert route_after_test({"test_result": {"success": False}, "repair_count": 4}) == "finalize"
 
 
 @pytest.mark.asyncio
@@ -209,7 +215,12 @@ async def test_in_memory_graph_happy_path_preapproved(mock_gateway_fixture):
         "is_stub": False,
     }
 
-    config = {"configurable": {"thread_id": "thread-test-run-1", "execution_service": make_success_execution_service()}}
+    config = {
+        "configurable": {
+            "thread_id": "thread-test-run-1",
+            "execution_service": make_success_execution_service(),
+        }
+    }
     final_state = await graph.ainvoke(initial, config=config)
 
     assert final_state["thread_id"] == "thread-test-run-1"
@@ -279,7 +290,12 @@ async def test_hitl_resume_with_approval(mock_gateway_fixture):
     """Resuming an interrupted thread with approval=True and verified test results completes workflow."""
     graph = build_agent_graph()
     thread_id = "thread-hitl-resume-approved"
-    config = {"configurable": {"thread_id": thread_id, "execution_service": make_success_execution_service()}}
+    config = {
+        "configurable": {
+            "thread_id": thread_id,
+            "execution_service": make_success_execution_service(),
+        }
+    }
 
     initial = create_initial_state(
         task_id="task-hitl-2",
@@ -398,9 +414,7 @@ async def test_planner_node_structured_output():
 async def test_planner_node_error_handling():
     """Verifies planner handles gateway failure without fabricating plan."""
     mock_gw = MagicMock(spec=LLMGateway)
-    mock_gw.generate_structured = AsyncMock(
-        side_effect=LLMResponseException("JSON decode error")
-    )
+    mock_gw.generate_structured = AsyncMock(side_effect=LLMResponseException("JSON decode error"))
 
     state = create_initial_state("1", "/test", "t1", prompt="Add endpoint")
     res = await planner(state, config={"configurable": {"llm_gateway": mock_gw}})
@@ -581,6 +595,61 @@ async def test_finalize_reflects_actual_evidence_only():
     assert final.files_changed == []  # Not applied!
 
 
+@pytest.mark.asyncio
+async def test_graph_coder_failure_does_not_phantom_pass_after_approval():
+    """Regression test: when Coder fails, approving must NOT run test_runner or complete task."""
+    mock_gw = MagicMock(spec=LLMGateway)
+
+    async def mock_structured_with_coder_failure(prompt, response_schema, **kwargs):
+        if response_schema is PlannerOutput:
+            return PlannerOutput(summary="Plan", steps=["Step 1"], files_expected=["a.py"])
+        if response_schema is CoderOutput:
+            raise LLMResponseException("429 Too Many Requests: Rate limit exceeded")
+        if response_schema is ReviewerOutput:
+            return ReviewerOutput(verdict="approved", summary="Approved")
+        return response_schema.model_validate({})
+
+    mock_gw.generate_structured = AsyncMock(side_effect=mock_structured_with_coder_failure)
+    set_llm_gateway(mock_gw)
+
+    mock_exec = make_success_execution_service()
+    memory_saver = MemorySaver()
+    graph = build_agent_graph(checkpointer=memory_saver)
+
+    thread_id = "thread-regression-phantom-pass"
+    config = {
+        "configurable": {
+            "thread_id": thread_id,
+            "llm_gateway": mock_gw,
+            "execution_service": mock_exec,
+        }
+    }
+
+    initial = create_initial_state(
+        task_id="task-phantom-1",
+        workspace_path="/test/workspace",
+        thread_id=thread_id,
+        prompt="Build feature",
+    )
+
+    # 1. Run to approval_gate interrupt
+    await graph.ainvoke(initial, config=config)
+    snap = graph.get_state(config)
+    assert snap.next == ("approval_gate",)
+    assert "429" in str(snap.values.get("error"))
+
+    # 2. Operator approves despite coder error
+    resumed = await graph.ainvoke(Command(resume={"approved": True}), config=config)
+
+    # 3. Must finalize as failed, never completed
+    assert resumed["final_result"] is not None
+    assert resumed["final_result"].status == "failed"
+    assert resumed["final_result"].files_changed == []
+
+    # 4. Critical invariant: sandbox execute was NEVER called on untouched repo
+    mock_exec.execute_in_sandbox.assert_not_called()
+
+
 def test_model_output_has_no_execution_authority():
     """Verifies malicious commands or paths in model output cannot bypass boundaries."""
     malicious_proposal = CoderOutput(
@@ -602,6 +671,7 @@ async def test_finalize_success_true_is_stub_false_approved_completed():
     """Verifies success=True, is_stub=False, approved reviewer, human approval -> completed."""
     state = create_initial_state("1", "/test", "t1")
     state["approval"] = True
+    state["applied_diff"] = "diff"
     state["test_result"] = {"success": True, "output": "3 passed", "is_stub": False}
     state["review_summary"] = ReviewerOutput(
         verdict="approved",
@@ -641,7 +711,7 @@ async def test_finalize_success_true_missing_is_stub_approved_completed():
     """Verifies success=True with missing is_stub preserves existing intended behavior (completed)."""
     state = create_initial_state("1", "/test", "t1")
     state["approval"] = True
-    # Notice: is_stub key is omitted completely
+    state["applied_diff"] = "diff"
     state["test_result"] = {"success": True, "output": "3 passed in sandbox"}
     state["review_summary"] = ReviewerOutput(
         verdict="approved",
