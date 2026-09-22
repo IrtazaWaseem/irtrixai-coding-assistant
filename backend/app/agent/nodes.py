@@ -359,6 +359,7 @@ def split_unified_diff(patch_text: str) -> list[tuple[str, str]]:
         line_str = line.strip()
         target = ""
 
+        # Check for standard unified diff or fallback '*** Update File:' headers
         if line_str.startswith("diff --git "):
             old_line, new_line = "", ""
             for k in range(1, min(6, len(lines) - i)):
@@ -378,6 +379,9 @@ def split_unified_diff(patch_text: str) -> list[tuple[str, str]]:
                     new_line = nxt
                     break
             target = _extract_target_from_header(old_line, new_line)
+        elif "*** Update File:" in line_str or "*** Add File:" in line_str:
+            raw_target = line_str.split("File:", 1)[1].strip()
+            target = raw_target.split("@@")[0].strip().replace("b/", "").replace("a/", "")
 
         if target and target != "/dev/null":
             file_indices.append(i)
@@ -746,7 +750,14 @@ async def coder(state: AgentState, config: RunnableConfig | None = None) -> dict
 
     prompt_blocks.append(
         "CODER IMPLEMENTATION REQUIREMENTS (MINIMAL PATCH PRINCIPLE):\n"
-        "1. Generate concrete code modifications formatted strictly as a unified diff (`--- a/...` and `+++ b/...`).\n"
+        "1. Generate concrete code modifications formatted strictly as standard unified diffs:\n"
+        "   --- a/path/to/file.py\n"
+        "   +++ b/path/to/file.py\n"
+        "   @@ -1,4 +1,5 @@\n"
+        "    existing line\n"
+        "   -old line\n"
+        "   +new line\n"
+        "   Do NOT use '*** Begin Patch' or markdown code blocks; output standard unified diff headers.\n"
         "2. Modify ONLY the files strictly necessary to satisfy the plan and tests. Do not refactor unrelated code.\n"
         "3. Reuse existing repository conventions, signatures, and utility functions.\n"
         "4. If behavior is modified or added, include or update corresponding behavior-oriented unit/integration tests.\n"

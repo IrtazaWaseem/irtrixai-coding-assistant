@@ -78,8 +78,8 @@ class GroqProvider(LLMProvider):
         }
         if temperature is not None:
             payload["temperature"] = temperature
-        if max_output_tokens is not None:
-            payload["max_tokens"] = max_output_tokens
+        # Ensure sufficient output token headroom so diffs are never truncated
+        payload["max_tokens"] = max_output_tokens if max_output_tokens is not None else 4096
         if response_format is not None:
             payload["response_format"] = response_format
 
