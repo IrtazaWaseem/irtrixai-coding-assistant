@@ -1,12 +1,9 @@
 """Multi-provider model diagnostic tool for IrtrixAI."""
 
 import asyncio
-import os
 import sys
 import time
 from pathlib import Path
-
-from pydantic import BaseModel, Field
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -52,12 +49,9 @@ async def test_groq():
         print("  [!] Skipped: GROQ_API_KEY is not set.")
         return
 
-    # Candidates active on your Groq key
     candidates = [
-        "qwen/qwen3.8-27b",
         "openai/gpt-oss-120b",
         "openai/gpt-oss-20b",
-        "groq/compound",
         "allam-2-7b",
     ]
 

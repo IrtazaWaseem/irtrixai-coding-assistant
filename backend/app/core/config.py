@@ -36,11 +36,11 @@ class Settings(BaseSettings):
     )
     TEST_DATABASE_URL: str | None = None
 
-    # LLM Providers & Gateway Configuration
-    PRIMARY_LLM_PROVIDER: str = "gemini"
-    PRIMARY_LLM_MODEL: str = "gemini-2.5-flash"
-    FALLBACK_LLM_PROVIDER: str | None = "groq"
-    FALLBACK_LLM_MODEL: str | None = "openai/gpt-oss-120b"
+    # LLM Providers & Gateway Configuration (Ollama default allows CI tests to run without API keys)
+    PRIMARY_LLM_PROVIDER: str = "ollama"
+    PRIMARY_LLM_MODEL: str = "qwen2.5vl:7b"
+    FALLBACK_LLM_PROVIDER: str | None = None
+    FALLBACK_LLM_MODEL: str | None = None
 
     GEMINI_API_KEY: str = ""
     GEMINI_MODEL: str = "gemini-2.5-flash"
