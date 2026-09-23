@@ -24,6 +24,21 @@ CHECKPOINTER_SETUP_LOCK_KEY: int = (
     7596528766795491435  # int.from_bytes(b"irtx_chk", "big", signed=True)
 )
 
+# Whitelist of agent contract classes allowed for MsgPack serialization/deserialization.
+# Explicitly registering these types prevents unhandled fallback deserialization
+# and protects persistent PostgreSQL checkpoints against future LangGraph strict-serde deprecations.
+ALLOWED_CHECKPOINT_MODULES: list[tuple[str, str]] = [
+    ("app.schemas.agent_contracts", "PlannerOutput"),
+    ("app.schemas.agent_contracts", "CoderOutput"),
+    ("app.schemas.agent_contracts", "DebuggerOutput"),
+    ("app.schemas.agent_contracts", "ReviewerOutput"),
+    ("app.schemas.agent_contracts", "ReviewerVerdict"),
+    ("app.schemas.agent_contracts", "FinalizationResult"),
+    ("app.schemas.agent_contracts", "FinalizationStatus"),
+    ("app.schemas.agent_contracts", "RepositoryContext"),
+    ("app.schemas.agent_contracts", "PlanStep"),
+]
+
 
 def sanitize_postgres_error(error: Exception | str) -> str:
     """Sanitizes PostgreSQL errors and URIs, ensuring user and password credentials never leak."""
@@ -71,6 +86,10 @@ class PostgresCheckpointerManager:
 
         try:
             from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+            from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+
+            # Configure strict MsgPack serializer with explicit contract schemas
+            serde = JsonPlusSerializer(allowed_msgpack_modules=ALLOWED_CHECKPOINT_MODULES)
 
             pool = AsyncConnectionPool(
                 conninfo=uri,
@@ -110,7 +129,7 @@ class PostgresCheckpointerManager:
                     )
 
                 try:
-                    setup_saver = AsyncPostgresSaver(conn)
+                    setup_saver = AsyncPostgresSaver(conn, serde=serde)
                     await setup_saver.setup()
                 finally:
                     try:
@@ -124,7 +143,7 @@ class PostgresCheckpointerManager:
                             sanitize_postgres_error(unlock_err),
                         )
 
-            self._checkpointer = AsyncPostgresSaver(pool)
+            self._checkpointer = AsyncPostgresSaver(pool, serde=serde)
             self._initialized = True
             logger.info("PostgreSQL checkpointer initialized and migrations verified.")
         except Exception as err:
