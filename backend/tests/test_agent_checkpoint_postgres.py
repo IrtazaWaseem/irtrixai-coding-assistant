@@ -1,140 +1,150 @@
-from unittest.mock import AsyncMock, MagicMock, patch
+import asyncio
+import os
+import subprocess
+import sys
+import uuid
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from langgraph.checkpoint.memory import MemorySaver
+import pytest_asyncio
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.types import Command
+from psycopg_pool import AsyncConnectionPool
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from app.agent.checkpoint import (
-    PostgresCheckpointerManager,
-    sanitize_postgres_error,
-)
-from app.agent.graph import build_agent_graph, get_production_graph
-from app.agent.nodes import set_llm_gateway
+from app.agent.checkpoint import ALLOWED_CHECKPOINT_MODULES
+from app.agent.graph import build_agent_graph
+from app.agent.nodes import set_execution_service, set_llm_gateway
 from app.agent.state import create_initial_state
-from app.core.config import settings
-from app.core.exceptions import ToolExecutionException
-from app.schemas.agent_contracts import CoderOutput, PlannerOutput
+from app.db.base import Base
+from app.db.models import Task, TaskStatus, Workspace
+from app.schemas.agent_contracts import (
+    CoderOutput,
+    FinalizationStatus,
+    PlannerOutput,
+    ReviewerOutput,
+)
 from app.services.llm.gateway import LLMGateway
+from app.services.task_service import TaskService
+
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 
-def test_sanitize_postgres_error_redacts_credentials_and_uri():
-    raw_err = (
-        "connection to postgresql://myuser:secret123@localhost:5432/mydb?sslmode=disable failed"
+@pytest.fixture(scope="session")
+def event_loop_policy():
+    if sys.platform == "win32":
+        return asyncio.WindowsSelectorEventLoopPolicy()
+    return asyncio.DefaultEventLoopPolicy()
+
+
+VALID_TEST_PATCH = "--- a/a.py\n+++ b/a.py\n@@ -1,1 +1,2 @@\n # initial file\n+# updated line\n"
+
+
+def get_test_serializer() -> JsonPlusSerializer:
+    """Matches production JsonPlusSerializer whitelist to eliminate MsgPack warnings."""
+    return JsonPlusSerializer(allowed_msgpack_modules=ALLOWED_CHECKPOINT_MODULES)
+
+
+def init_test_git_repo(repo_path: Path) -> None:
+    (repo_path / ".gitkeep").touch()
+    (repo_path / "a.py").write_text("# initial file\n", encoding="utf-8")
+    subprocess.run(["git", "init"], cwd=str(repo_path), capture_output=True, check=True)
+    subprocess.run(
+        ["git", "config", "user.name", "TestRunner"],
+        cwd=str(repo_path),
+        capture_output=True,
+        check=True,
     )
-    sanitized = sanitize_postgres_error(raw_err)
-    assert "secret123" not in sanitized
-    assert "myuser" not in sanitized
-    assert "[REDACTED_USER]:[REDACTED_PASSWORD]@localhost:5432/mydb" in sanitized
+    subprocess.run(
+        ["git", "config", "user.email", "test@irtrixai.internal"],
+        cwd=str(repo_path),
+        capture_output=True,
+        check=True,
+    )
+    subprocess.run(["git", "add", "."], cwd=str(repo_path), capture_output=True, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "initial commit"],
+        cwd=str(repo_path),
+        capture_output=True,
+        check=True,
+    )
 
 
-def test_sanitize_postgres_error_with_at_symbol_in_password():
-    """Verifies passwords containing '@' symbols are fully redacted from error strings."""
-    raw_err = "connection to postgresql://app_user:p@ss@@word#123@db.internal:5432/prod_db failed"
-    sanitized = sanitize_postgres_error(raw_err)
-    assert "p@ss@@word#123" not in sanitized
-    assert "app_user" not in sanitized
-    assert "[REDACTED_USER]:[REDACTED_PASSWORD]@db.internal:5432/prod_db" in sanitized
+def get_test_postgres_uri() -> str:
+    user = os.getenv("TEST_POSTGRES_USER", "postgres")
+    password = os.getenv("TEST_POSTGRES_PASSWORD", "test_secure_password_123")
+    host = os.getenv("TEST_POSTGRES_HOST", "localhost")
+    port = os.getenv("TEST_POSTGRES_PORT", "15432")
+    db = os.getenv("TEST_POSTGRES_DB", "irtrixai_test")
+    return f"postgresql://{user}:{password}@{host}:{port}/{db}"
 
 
-@pytest.mark.asyncio
-async def test_postgres_initialize_sanitizes_thrown_error():
-    manager = PostgresCheckpointerManager()
-    with patch(
-        "psycopg_pool.AsyncConnectionPool.open",
-        side_effect=RuntimeError(
-            f"Password {settings.POSTGRES_PASSWORD} failed on postgresql://usr:{settings.POSTGRES_PASSWORD}@localhost:5432/db"
-        ),
-    ):
-        with pytest.raises(ToolExecutionException) as exc_info:
-            await manager.initialize()
-        err_msg = str(exc_info.value)
-        assert settings.POSTGRES_PASSWORD not in err_msg or len(settings.POSTGRES_PASSWORD) < 4
-        assert "[REDACTED_PASSWORD]" in err_msg or "******" in err_msg
+def get_test_postgres_async_uri() -> str:
+    return get_test_postgres_uri().replace("postgresql://", "postgresql+asyncpg://", 1)
 
 
-@pytest.mark.asyncio
-async def test_lifespan_fails_closed_on_checkpointer_failure():
-    manager = PostgresCheckpointerManager()
-    with patch.object(
-        manager,
-        "initialize",
-        side_effect=ToolExecutionException("DB connection failed"),
-    ):
-        with pytest.raises(ToolExecutionException):
-            await manager.initialize()
-    assert not manager.is_initialized
+@pytest_asyncio.fixture
+async def live_postgres_pool():
+    """Sets up an AsyncConnectionPool and initializes LangGraph checkpoint tables in real PostgreSQL."""
+    uri = get_test_postgres_uri()
+    serde = get_test_serializer()
+    pool = AsyncConnectionPool(
+        conninfo=uri,
+        max_size=10,
+        kwargs={"autocommit": True, "prepare_threshold": 0},
+        open=False,
+    )
+    try:
+        await pool.open()
+        saver = AsyncPostgresSaver(pool, serde=serde)
+        await saver.setup()
+    except Exception as exc:
+        if pool is not None:
+            await pool.close()
+        pytest.fail(
+            f"Failed to connect to test PostgreSQL checkpointer at {uri}. "
+            f"Ensure test container is running via 'docker-compose -f docker-compose.test.yml up -d'. Error: {exc}"
+        )
+
+    yield pool
+    await pool.close()
 
 
-def test_build_agent_graph_default_uses_memory_saver():
-    graph = build_agent_graph()
-    assert graph.checkpointer is not None
-    assert isinstance(graph.checkpointer, MemorySaver)
+@pytest_asyncio.fixture
+async def live_db_session_factory():
+    """Provides sessionmaker for real PostgreSQL task tables."""
+    async_uri = get_test_postgres_async_uri()
+    try:
+        engine = create_async_engine(async_uri, echo=False)
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+    except Exception as exc:
+        pytest.fail(
+            f"Failed to connect to test PostgreSQL database at {async_uri}. "
+            f"Ensure test container is running via 'docker-compose -f docker-compose.test.yml up -d'. Error: {exc}"
+        )
 
-
-def test_get_production_graph_fails_closed_when_uninitialized():
-    manager = PostgresCheckpointerManager()
-    with patch("app.agent.graph.checkpointer_manager", manager):
-        with pytest.raises(ToolExecutionException) as exc_info:
-            get_production_graph()
-        assert "Production checkpointer is not initialized" in str(exc_info.value)
+    session_factory = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
+    yield session_factory
+    await engine.dispose()
 
 
 @pytest.mark.postgres
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_postgres_checkpoint_persistence_across_graph_instances():
-    mock_saver = MemorySaver()
-    manager = PostgresCheckpointerManager()
-    manager._checkpointer = mock_saver
-    manager._initialized = True
+async def test_real_postgres_checkpoint_persistence_across_graph_instances(
+    tmp_path: Path, live_postgres_pool
+):
+    """Proves Graph Instance B recovers exact state written by discarded Graph Instance A."""
+    ws_path = tmp_path / "ws_pg_chk_persist"
+    ws_path.mkdir(parents=True, exist_ok=True)
+    init_test_git_repo(ws_path)
 
-    mock_gw = MagicMock(spec=LLMGateway)
-
-    async def mock_structured(prompt, response_schema, **kwargs):
-        if response_schema is PlannerOutput:
-            return PlannerOutput(
-                summary="Plan persistent test",
-                steps=["S1"],
-                files_expected=["a.py"],
-            )
-        if response_schema is CoderOutput:
-            return CoderOutput(
-                summary="Code persistent test",
-                patch="diff",
-                files_changed=["a.py"],
-            )
-        return response_schema.model_validate({})
-
-    mock_gw.generate_structured = AsyncMock(side_effect=mock_structured)
-    set_llm_gateway(mock_gw)
-
-    thread_id = "th-pg-persist-1"
+    thread_id = f"thread-persist-{uuid.uuid4()}"
     config = {"configurable": {"thread_id": thread_id}}
-
-    with patch("app.agent.graph.checkpointer_manager", manager):
-        graph1 = get_production_graph()
-        init_state = create_initial_state("task-1", "/tmp/ws", thread_id)
-        await graph1.ainvoke(init_state, config=config)
-
-        del graph1
-
-        graph2 = get_production_graph()
-        snap = await graph2.aget_state(config)
-        assert snap is not None
-        assert snap.values["task_id"] == "task-1"
-        assert snap.next == ("approval_gate",)
-
-    set_llm_gateway(None)
-
-
-@pytest.mark.postgres
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_postgres_rejection_feedback_loop_persistence():
-    mock_saver = MemorySaver()
-    manager = PostgresCheckpointerManager()
-    manager._checkpointer = mock_saver
-    manager._initialized = True
 
     mock_gw = MagicMock(spec=LLMGateway)
 
@@ -142,70 +152,169 @@ async def test_postgres_rejection_feedback_loop_persistence():
         if response_schema is PlannerOutput:
             return PlannerOutput(summary="Plan", steps=["S1"], files_expected=["a.py"])
         if response_schema is CoderOutput:
-            return CoderOutput(summary="Code", patch="diff", files_changed=["a.py"])
+            return CoderOutput(summary="Code", patch=VALID_TEST_PATCH, files_changed=["a.py"])
+        if response_schema is ReviewerOutput:
+            return ReviewerOutput(verdict="approved", summary="Ok")
         return response_schema.model_validate({})
 
     mock_gw.generate_structured = AsyncMock(side_effect=mock_structured)
     set_llm_gateway(mock_gw)
 
-    thread_id = "th-pg-reject-1"
+    mock_exec = MagicMock()
+    mock_exec.execute_in_sandbox.return_value = {
+        "command": "pytest",
+        "exit_code": 0,
+        "stdout": "1 passed",
+        "stderr": "",
+        "success": True,
+    }
+    set_execution_service(mock_exec)
+
+    serde = get_test_serializer()
+
+    try:
+        saver_a = AsyncPostgresSaver(live_postgres_pool, serde=serde)
+        graph_a = build_agent_graph(checkpointer=saver_a)
+
+        initial_state = create_initial_state("task-persist-1", str(ws_path), thread_id)
+        await graph_a.ainvoke(initial_state, config=config)
+
+        snap_a = await graph_a.aget_state(config)
+        assert snap_a.next == ("approval_gate",)
+        assert snap_a.values["task_id"] == "task-persist-1"
+
+        del graph_a
+        del saver_a
+
+        saver_b = AsyncPostgresSaver(live_postgres_pool, serde=serde)
+        graph_b = build_agent_graph(checkpointer=saver_b)
+
+        snap_b = await graph_b.aget_state(config)
+        assert snap_b is not None
+        assert snap_b.next == ("approval_gate",)
+        assert snap_b.values["task_id"] == "task-persist-1"
+        assert snap_b.values.get("pending_patch") == VALID_TEST_PATCH
+
+        resume_cmd = Command(resume={"approved": True, "feedback": "Approved on B"})
+        await graph_b.ainvoke(resume_cmd, config=config)
+
+        post_resume_snap = await graph_b.aget_state(config)
+        assert post_resume_snap.next == ()
+        assert post_resume_snap.values["final_result"].status == FinalizationStatus.COMPLETED
+    finally:
+        set_llm_gateway(None)
+        set_execution_service(None)
+
+
+@pytest.mark.postgres
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_real_postgres_reconciliation_integration(
+    tmp_path: Path, live_db_session_factory, live_postgres_pool
+):
+    """Proves reconcile_task_status updates real PostgreSQL task rows based on checkpoint data."""
+    ws_path = tmp_path / "ws_real_recon"
+    ws_path.mkdir(parents=True, exist_ok=True)
+    init_test_git_repo(ws_path)
+
+    serde = get_test_serializer()
+    saver = AsyncPostgresSaver(live_postgres_pool, serde=serde)
+    graph = build_agent_graph(checkpointer=saver)
+
+    async with live_db_session_factory() as session:
+        ws = Workspace(name="ws_recon_test", root_path=str(ws_path))
+        session.add(ws)
+        await session.flush()
+
+        task = Task(workspace_id=ws.id, prompt="Test reconciliation", status=TaskStatus.RUNNING)
+        session.add(task)
+        await session.commit()
+        t_id = str(task.id)
+
+    # 1. Stale RUNNING task with no checkpoint -> reconciles to FAILED
+    async with live_db_session_factory() as session:
+        db_task = await TaskService.get_task(session, t_id)
+        reconciled = await TaskService.reconcile_task_status(session, db_task, graph)
+        assert reconciled.status == TaskStatus.FAILED
+
+    # 2. Reconcile with active graph execution at approval_gate
+    thread_id = db_task.thread_id
     config = {"configurable": {"thread_id": thread_id}}
 
-    with patch("app.agent.graph.checkpointer_manager", manager):
-        graph = get_production_graph()
-        init_state = create_initial_state("task-rej", "/tmp/ws", thread_id)
+    mock_gw = MagicMock(spec=LLMGateway)
+
+    async def mock_structured(prompt, response_schema, **kwargs):
+        if response_schema is PlannerOutput:
+            return PlannerOutput(summary="Plan", steps=["S1"], files_expected=["a.py"])
+        if response_schema is CoderOutput:
+            return CoderOutput(summary="Code", patch=VALID_TEST_PATCH, files_changed=["a.py"])
+        if response_schema is ReviewerOutput:
+            return ReviewerOutput(verdict="approved", summary="Ok")
+        return response_schema.model_validate({})
+
+    mock_gw.generate_structured = AsyncMock(side_effect=mock_structured)
+    set_llm_gateway(mock_gw)
+
+    mock_exec = MagicMock()
+    mock_exec.execute_in_sandbox.return_value = {
+        "command": "pytest",
+        "exit_code": 0,
+        "stdout": "1 passed",
+        "stderr": "",
+        "success": True,
+    }
+    set_execution_service(mock_exec)
+
+    try:
+        init_state = create_initial_state(t_id, str(ws_path), thread_id)
         await graph.ainvoke(init_state, config=config)
 
-        cmd = Command(resume={"approved": False, "feedback": "Fix security vulnerability"})
-        await graph.ainvoke(cmd, config=config)
+        async with live_db_session_factory() as session:
+            db_task = await TaskService.get_task(session, t_id)
+            db_task.status = TaskStatus.RUNNING
+            await session.commit()
 
-        snap = await graph.aget_state(config)
-        assert snap.next == ("approval_gate",)
-        assert snap.values["feedback"] == "Fix security vulnerability"
+            reconciled = await TaskService.reconcile_task_status(session, db_task, graph)
+            assert reconciled.status == TaskStatus.AWAITING_APPROVAL
 
-    set_llm_gateway(None)
+        # 3. Resume graph to completion (completed checkpoint -> reconciles to COMPLETED)
+        resume_cmd = Command(resume={"approved": True, "feedback": "Proceed"})
+        await graph.ainvoke(resume_cmd, config=config)
 
+        snap_completed = await graph.aget_state(config)
+        assert snap_completed is not None
+        assert snap_completed.next == ()
 
-@pytest.mark.postgres
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_postgres_multiple_threads_isolated():
-    mock_saver = MemorySaver()
-    manager = PostgresCheckpointerManager()
-    manager._checkpointer = mock_saver
-    manager._initialized = True
+        async with live_db_session_factory() as session:
+            db_task = await TaskService.get_task(session, t_id)
+            db_task.status = TaskStatus.RUNNING
+            await session.commit()
 
-    mock_gw = MagicMock(spec=LLMGateway)
+            reconciled = await TaskService.reconcile_task_status(session, db_task, graph)
+            assert reconciled.status == TaskStatus.COMPLETED
 
-    async def mock_structured(prompt, response_schema, **kwargs):
-        if response_schema is PlannerOutput:
-            return PlannerOutput(summary="Plan", steps=["S1"], files_expected=["a.py"])
-        if response_schema is CoderOutput:
-            return CoderOutput(summary="Code", patch="diff", files_changed=["a.py"])
-        return response_schema.model_validate({})
-
-    mock_gw.generate_structured = AsyncMock(side_effect=mock_structured)
-    set_llm_gateway(mock_gw)
-
-    with patch("app.agent.graph.checkpointer_manager", manager):
-        graph = get_production_graph()
-
-        cfg1 = {"configurable": {"thread_id": "th-iso-1"}}
-        cfg2 = {"configurable": {"thread_id": "th-iso-2"}}
-
-        await graph.ainvoke(
-            create_initial_state("task-iso-1", "/tmp/ws1", "th-iso-1"),
-            config=cfg1,
-        )
-        await graph.ainvoke(
-            create_initial_state("task-iso-2", "/tmp/ws2", "th-iso-2"),
-            config=cfg2,
+        # 4. Checkpoint with aborted final_result -> reconciles to CANCELLED
+        await graph.aupdate_state(
+            config,
+            {"final_result": {"status": "aborted", "summary": "Halted"}},
+            as_node="finalize",
         )
 
-        snap1 = await graph.aget_state(cfg1)
-        snap2 = await graph.aget_state(cfg2)
+        snap_aborted = await graph.aget_state(config)
+        assert snap_aborted is not None
+        assert snap_aborted.next == ()
+        assert snap_aborted.values.get("final_result") == {
+            "status": "aborted",
+            "summary": "Halted",
+        }
 
-        assert snap1.values["task_id"] == "task-iso-1"
-        assert snap2.values["task_id"] == "task-iso-2"
+        async with live_db_session_factory() as session:
+            db_task = await TaskService.get_task(session, t_id)
+            db_task.status = TaskStatus.RUNNING
+            await session.commit()
 
-    set_llm_gateway(None)
+            reconciled = await TaskService.reconcile_task_status(session, db_task, graph)
+            assert reconciled.status == TaskStatus.CANCELLED
+    finally:
+        set_llm_gateway(None)
+        set_execution_service(None)

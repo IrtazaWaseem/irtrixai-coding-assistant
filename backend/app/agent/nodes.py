@@ -285,7 +285,6 @@ def _clean_header_path(raw: str) -> str:
 
 
 def _extract_target_from_header(old_line: str, new_line: str) -> str:
-    # A valid unified diff header MUST have both an old (--- ) and new (+++ ) line
     if not (old_line.startswith("--- ") and new_line.startswith("+++ ")):
         return ""
 
@@ -353,7 +352,6 @@ def split_unified_diff(patch_text: str) -> list[tuple[str, str]]:
             lines_raw = lines_raw[:-1]
         cleaned = "\n".join(lines_raw).strip()
 
-    # Pre-process: repair model diffs where headers were squashed without newlines
     cleaned = re.sub(r"([^\n\r])(--- [ab]/)", r"\1\n\2", cleaned)
     cleaned = re.sub(r"([^\n\r])(diff --git )", r"\1\n\2", cleaned)
     cleaned = re.sub(r"(--- [^\n\r]+?)\s*(\+\+\+ )", r"\1\n\2", cleaned)
@@ -732,7 +730,6 @@ async def coder(state: AgentState, config: RunnableConfig | None = None) -> dict
                     "Relevant Existing Code Excerpts (UNTRUSTED DATA):\n" + "\n\n".join(file_blocks)
                 )
     else:
-        # REPAIR CYCLE: Read the actual post-patch disk state and ingest pytest traceback
         prompt_blocks.append(
             f"ACTIVE REPAIR CYCLE ({repair_count} of {MAX_REPAIR_ITERATIONS}):\n"
             "A previous patch was applied to disk, but automated tests failed. "
@@ -745,7 +742,6 @@ async def coder(state: AgentState, config: RunnableConfig | None = None) -> dict
             tail_err = "\n".join(err_lines[-60:]) if len(err_lines) > 60 else raw_err
             prompt_blocks.append(f"Authoritative Test Failure Traceback:\n```\n{tail_err}\n```")
 
-        # Determine all files touched or diagnosed for re-reading from disk
         files_to_read: set[str] = set(affected_files)
         coder_prop = state.get("coder_proposal")
         if coder_prop:
@@ -808,7 +804,6 @@ async def coder(state: AgentState, config: RunnableConfig | None = None) -> dict
         if files_to_fix:
             debug_lines.append("Target Repair Files: " + ", ".join(files_to_fix))
 
-        # Matches exact test contract string
         prompt_blocks.append(
             "Debugger Failure Analysis (REPAIR IN PROGRESS):\n" + "\n".join(debug_lines)
         )
@@ -1082,7 +1077,6 @@ async def debugger(state: AgentState, config: RunnableConfig | None = None) -> d
     gateway = _resolve_gateway(config, state)
 
     raw_test_output = str(test_res.get("output") or "Unknown failure output")
-    # Token Optimization: slice test output to the most relevant trailing 60 lines containing the failure
     output_lines = raw_test_output.splitlines()
     test_output = "\n".join(output_lines[-60:]) if len(output_lines) > 60 else raw_test_output
 
@@ -1141,6 +1135,12 @@ async def finalize(state: AgentState) -> dict[str, Any]:
     review_status = state.get("review_status")
     review_advisory = state.get("review_advisory")
 
+    coder_prop = state.get("coder_proposal")
+    applied_diff = state.get("applied_diff")
+    files_changed = _get_val(coder_prop, "files_changed", []) or []
+    proposed_patch = str(_get_val(coder_prop, "patch", "") or "").strip()
+    has_proposed_changes = bool(files_changed) and bool(proposed_patch)
+
     review_verdict = _get_val(review, "verdict")
     verdict_str = str(getattr(review_verdict, "value", review_verdict) or "").strip().lower()
     review_summary_text = _get_val(review, "summary", "")
@@ -1173,6 +1173,10 @@ async def finalize(state: AgentState) -> dict[str, Any]:
     elif verdict_str == "changes_requested":
         status = "failed"
         summary = f"Task failed: reviewer requested changes: {review_summary_text}"
+    # DEFENSIVE INVARIANT: If changes were proposed, a verified diff MUST be applied to disk.
+    elif has_proposed_changes and not str(applied_diff or "").strip():
+        status = "failed"
+        summary = "Task failed: code modifications were proposed but no verified diff was applied to disk."
     elif (
         test_passed
         and bool(approval) is True
@@ -1199,8 +1203,7 @@ async def finalize(state: AgentState) -> dict[str, Any]:
         executed_tests.append(str(state["test_command"]))
 
     actual_files_changed: list[str] = []
-    if state.get("applied_diff") and state.get("coder_proposal"):
-        coder_prop = state["coder_proposal"]
+    if applied_diff and coder_prop:
         files_val = _get_val(coder_prop, "files_changed", [])
         if files_val:
             actual_files_changed = list(files_val)
@@ -1503,13 +1506,14 @@ async def reviewer(state: AgentState, config: RunnableConfig | None = None) -> d
                 required_changes=list(review.required_changes) + ["Ensure all test suites pass."],
             )
 
+        # PRESERVE incoming error; do not unconditionally overwrite with None
         return {
             "review_summary": review,
             "review_status": "completed",
             "review_advisory": None,
             "token_usage": updated_usage,
             "current_step": 7,
-            "error": None,
+            "error": prior_error,
         }
     except Exception as err:
         from app.core.exceptions import LLMRateLimitException
@@ -1540,7 +1544,7 @@ async def reviewer(state: AgentState, config: RunnableConfig | None = None) -> d
                 "review_status": status_code,
                 "review_advisory": advisory,
                 "current_step": 7,
-                "error": None,
+                "error": prior_error,
             }
 
         failure_msg = prior_error or f"Reviewer failed: {clean_err}"

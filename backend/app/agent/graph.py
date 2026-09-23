@@ -41,6 +41,12 @@ def route_after_approval(state: AgentState) -> str:
     return "finalize"
 
 
+def route_after_patch(state: AgentState) -> str:
+    if state.get("error"):
+        return "finalize"
+    return "test_runner"
+
+
 def route_after_test(state: AgentState) -> str:
     test_res = state.get("test_result")
     test_passed = isinstance(test_res, dict) and test_res.get("success") is True
@@ -107,7 +113,15 @@ def build_agent_graph(checkpointer: BaseCheckpointSaver | None = None):
         },
     )
 
-    builder.add_edge("apply_approved_patch", "test_runner")
+    # Conditional Edge: Apply Approved Patch (bypasses test_runner on error)
+    builder.add_conditional_edges(
+        "apply_approved_patch",
+        route_after_patch,
+        {
+            "test_runner": "test_runner",
+            "finalize": "finalize",
+        },
+    )
 
     # Conditional Edge: Test Runner
     builder.add_conditional_edges(

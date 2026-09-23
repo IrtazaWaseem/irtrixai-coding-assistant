@@ -9,10 +9,12 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 import pytest_asyncio
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.types import Command
 from psycopg_pool import AsyncConnectionPool
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from app.agent.checkpoint import ALLOWED_CHECKPOINT_MODULES
 from app.agent.graph import build_agent_graph
 from app.agent.nodes import set_execution_service, set_llm_gateway
 from app.agent.state import create_initial_state
@@ -38,8 +40,23 @@ def event_loop_policy():
     return asyncio.DefaultEventLoopPolicy()
 
 
+VALID_TEST_PATCH = (
+    "--- a/a.py\n"
+    "+++ b/a.py\n"
+    "@@ -1,1 +1,2 @@\n"
+    " # initial file\n"
+    "+# updated line\n"
+)
+
+
+def get_test_serializer() -> JsonPlusSerializer:
+    """Matches production JsonPlusSerializer whitelist to eliminate MsgPack warnings."""
+    return JsonPlusSerializer(allowed_msgpack_modules=ALLOWED_CHECKPOINT_MODULES)
+
+
 def init_test_git_repo(repo_path: Path) -> None:
     (repo_path / ".gitkeep").touch()
+    (repo_path / "a.py").write_text("# initial file\n", encoding="utf-8")
     subprocess.run(["git", "init"], cwd=str(repo_path), capture_output=True, check=True)
     subprocess.run(
         ["git", "config", "user.name", "TestRunner"],
@@ -79,6 +96,7 @@ def get_test_postgres_async_uri() -> str:
 async def live_postgres_pool():
     """Sets up an AsyncConnectionPool and initializes LangGraph checkpoint tables in real PostgreSQL."""
     uri = get_test_postgres_uri()
+    serde = get_test_serializer()
     pool = AsyncConnectionPool(
         conninfo=uri,
         max_size=10,
@@ -87,7 +105,7 @@ async def live_postgres_pool():
     )
     try:
         await pool.open()
-        saver = AsyncPostgresSaver(pool)
+        saver = AsyncPostgresSaver(pool, serde=serde)
         await saver.setup()
     except Exception as exc:
         if pool is not None:
@@ -140,7 +158,7 @@ async def test_real_postgres_checkpoint_persistence_across_graph_instances(
         if response_schema is PlannerOutput:
             return PlannerOutput(summary="Plan", steps=["S1"], files_expected=["a.py"])
         if response_schema is CoderOutput:
-            return CoderOutput(summary="Code", patch="diff", files_changed=["a.py"])
+            return CoderOutput(summary="Code", patch=VALID_TEST_PATCH, files_changed=["a.py"])
         if response_schema is ReviewerOutput:
             return ReviewerOutput(verdict="approved", summary="Ok")
         return response_schema.model_validate({})
@@ -158,8 +176,10 @@ async def test_real_postgres_checkpoint_persistence_across_graph_instances(
     }
     set_execution_service(mock_exec)
 
+    serde = get_test_serializer()
+
     try:
-        saver_a = AsyncPostgresSaver(live_postgres_pool)
+        saver_a = AsyncPostgresSaver(live_postgres_pool, serde=serde)
         graph_a = build_agent_graph(checkpointer=saver_a)
 
         initial_state = create_initial_state("task-persist-1", str(ws_path), thread_id)
@@ -172,14 +192,14 @@ async def test_real_postgres_checkpoint_persistence_across_graph_instances(
         del graph_a
         del saver_a
 
-        saver_b = AsyncPostgresSaver(live_postgres_pool)
+        saver_b = AsyncPostgresSaver(live_postgres_pool, serde=serde)
         graph_b = build_agent_graph(checkpointer=saver_b)
 
         snap_b = await graph_b.aget_state(config)
         assert snap_b is not None
         assert snap_b.next == ("approval_gate",)
         assert snap_b.values["task_id"] == "task-persist-1"
-        assert snap_b.values.get("pending_patch") == "diff"
+        assert snap_b.values.get("pending_patch") == VALID_TEST_PATCH
 
         resume_cmd = Command(resume={"approved": True, "feedback": "Approved on B"})
         await graph_b.ainvoke(resume_cmd, config=config)
@@ -203,7 +223,8 @@ async def test_real_postgres_reconciliation_integration(
     ws_path.mkdir(parents=True, exist_ok=True)
     init_test_git_repo(ws_path)
 
-    saver = AsyncPostgresSaver(live_postgres_pool)
+    serde = get_test_serializer()
+    saver = AsyncPostgresSaver(live_postgres_pool, serde=serde)
     graph = build_agent_graph(checkpointer=saver)
 
     async with live_db_session_factory() as session:
@@ -232,7 +253,7 @@ async def test_real_postgres_reconciliation_integration(
         if response_schema is PlannerOutput:
             return PlannerOutput(summary="Plan", steps=["S1"], files_expected=["a.py"])
         if response_schema is CoderOutput:
-            return CoderOutput(summary="Code", patch="diff", files_changed=["a.py"])
+            return CoderOutput(summary="Code", patch=VALID_TEST_PATCH, files_changed=["a.py"])
         if response_schema is ReviewerOutput:
             return ReviewerOutput(verdict="approved", summary="Ok")
         return response_schema.model_validate({})

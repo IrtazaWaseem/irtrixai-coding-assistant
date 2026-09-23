@@ -1,3 +1,4 @@
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -7,6 +8,7 @@ from langgraph.types import Command
 from app.agent.graph import (
     build_agent_graph,
     route_after_approval,
+    route_after_patch,
     route_after_test,
 )
 from app.agent.nodes import (
@@ -174,6 +176,13 @@ def test_route_after_approval_logic():
     assert route_after_approval({"approval": False}) == "finalize"
     assert route_after_approval({"approval": False, "feedback": "Fix imports"}) == "coder"
     assert route_after_approval({"approval": None}) == "finalize"
+
+
+def test_route_after_patch_logic():
+    """Verifies patch application routing logic."""
+    assert route_after_patch({"error": "Patch application failed"}) == "finalize"
+    assert route_after_patch({"error": None}) == "test_runner"
+    assert route_after_patch({}) == "test_runner"
 
 
 def test_route_after_test_repair_limits():
@@ -571,7 +580,7 @@ async def test_reviewer_cannot_override_unverified_truthy_string_test():
 
 @pytest.mark.asyncio
 async def test_finalize_reflects_actual_evidence_only():
-    """Verifies finalize does not fabricate changed files or unexecuted tests."""
+    """Verifies finalize fails when code changes were proposed without applied diff, without fabricating files."""
     state = create_initial_state("1", "/test", "t1")
     state["approval"] = True
     state["test_result"] = {"success": True, "is_stub": False}
@@ -584,15 +593,120 @@ async def test_finalize_reflects_actual_evidence_only():
         required_changes=[],
     )
     state["coder_proposal"] = CoderOutput(
-        summary="Proposed changes", files_changed=["unapplied.py"]
+        summary="Proposed changes",
+        patch="--- a/unapplied.py\n+++ b/unapplied.py\n@@ -1 +1 @@\n+x\n",
+        files_changed=["unapplied.py"],
     )
 
     res = await finalize(state)
     final: FinalizationResult = res["final_result"]
 
-    assert final.status == "completed"
+    assert final.status == "failed"
     assert final.tests == ["pytest tests/unit"]
-    assert final.files_changed == []  # Not applied!
+    assert final.files_changed == []
+
+
+@pytest.mark.asyncio
+async def test_graph_patch_application_failure_routes_to_finalize_without_running_tests(
+    tmp_path: Path,
+):
+    """Regression test: apply_approved_patch failure routes directly to finalize, bypassing test_runner."""
+    ws = tmp_path / "ws_patch_fail"
+    ws.mkdir(parents=True, exist_ok=True)
+
+    mock_gw = MagicMock(spec=LLMGateway)
+
+    async def mock_structured(prompt, response_schema, **kwargs):
+        if response_schema is PlannerOutput:
+            return PlannerOutput(summary="Plan", steps=["S1"], files_expected=["nonexistent.py"])
+        if response_schema is CoderOutput:
+            return CoderOutput(
+                summary="Bad patch",
+                patch="--- a/nonexistent.py\n+++ b/nonexistent.py\n@@ -1,1 +1,1 @@\n-invalid\n+context\n",
+                files_changed=["nonexistent.py"],
+            )
+        if response_schema is ReviewerOutput:
+            return ReviewerOutput(verdict="approved", summary="Should not run")
+        return response_schema.model_validate({})
+
+    mock_gw.generate_structured = AsyncMock(side_effect=mock_structured)
+    set_llm_gateway(mock_gw)
+
+    mock_exec = make_success_execution_service()
+    memory_saver = MemorySaver()
+    graph = build_agent_graph(checkpointer=memory_saver)
+
+    thread_id = "thread-regression-patch-fail"
+    config = {
+        "configurable": {
+            "thread_id": thread_id,
+            "llm_gateway": mock_gw,
+            "execution_service": mock_exec,
+        }
+    }
+
+    initial = create_initial_state(
+        task_id="task-patch-fail-1",
+        workspace_path=str(ws),
+        thread_id=thread_id,
+        prompt="Fix bug",
+    )
+
+    await graph.ainvoke(initial, config=config)
+    resumed = await graph.ainvoke(Command(resume={"approved": True}), config=config)
+
+    assert resumed["final_result"] is not None
+    assert resumed["final_result"].status == "failed"
+    assert resumed.get("test_result") is None
+    assert resumed.get("review_summary") is None
+    mock_exec.execute_in_sandbox.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_graph_noop_proposal_completes_successfully():
+    """Verifies legitimate no-op proposals with patch='' and files_changed=[] complete normally."""
+    mock_gw = MagicMock(spec=LLMGateway)
+
+    async def mock_structured(prompt, response_schema, **kwargs):
+        if response_schema is PlannerOutput:
+            return PlannerOutput(summary="Plan", steps=["Verify only"], files_expected=[])
+        if response_schema is CoderOutput:
+            return CoderOutput(summary="No change needed", patch="", files_changed=[])
+        if response_schema is ReviewerOutput:
+            return ReviewerOutput(verdict="approved", summary="No changes required, tests verified")
+        return response_schema.model_validate({})
+
+    mock_gw.generate_structured = AsyncMock(side_effect=mock_structured)
+    set_llm_gateway(mock_gw)
+
+    mock_exec = make_success_execution_service()
+    memory_saver = MemorySaver()
+    graph = build_agent_graph(checkpointer=memory_saver)
+
+    thread_id = "thread-noop-complete"
+    config = {
+        "configurable": {
+            "thread_id": thread_id,
+            "llm_gateway": mock_gw,
+            "execution_service": mock_exec,
+        }
+    }
+
+    initial = create_initial_state(
+        task_id="task-noop-1",
+        workspace_path="/test/workspace",
+        thread_id=thread_id,
+        prompt="Verify functionality",
+    )
+    initial["test_command"] = "pytest"
+
+    await graph.ainvoke(initial, config=config)
+    resumed = await graph.ainvoke(Command(resume={"approved": True}), config=config)
+
+    assert resumed["final_result"] is not None
+    assert resumed["final_result"].status == "completed"
+    assert resumed["final_result"].files_changed == []
+    mock_exec.execute_in_sandbox.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -632,21 +746,16 @@ async def test_graph_coder_failure_does_not_phantom_pass_after_approval():
         prompt="Build feature",
     )
 
-    # 1. Run to approval_gate interrupt
     await graph.ainvoke(initial, config=config)
     snap = graph.get_state(config)
     assert snap.next == ("approval_gate",)
     assert "429" in str(snap.values.get("error"))
 
-    # 2. Operator approves despite coder error
     resumed = await graph.ainvoke(Command(resume={"approved": True}), config=config)
 
-    # 3. Must finalize as failed, never completed
     assert resumed["final_result"] is not None
     assert resumed["final_result"].status == "failed"
     assert resumed["final_result"].files_changed == []
-
-    # 4. Critical invariant: sandbox execute was NEVER called on untouched repo
     mock_exec.execute_in_sandbox.assert_not_called()
 
 
