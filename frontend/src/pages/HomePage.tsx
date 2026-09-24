@@ -171,7 +171,12 @@ export const HomePage: React.FC = () => {
       id: "review",
       label: isReviewSkipped ? "Review (Skipped)" : "Review",
       icon: ShieldAlert,
-      isDone: (hasEvent("review_started") || isReviewSkipped) && isSuccessful,
+      isDone:
+        (Boolean(reviewResult) ||
+          reviewStatus === "completed" ||
+          hasEvent("review_started") ||
+          isReviewSkipped) &&
+        isSuccessful,
       isActive: activeStepId === "review",
     },
     {

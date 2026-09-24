@@ -104,7 +104,6 @@ def list_files(
                     if is_protected_file(safe_child):
                         continue
                 except SecurityViolationException:
-                    # Robust symlink handling: skip unsafe entries without aborting listing
                     continue
 
                 rel_path = str(safe_child.relative_to(base_dir)).replace("\\", "/")
@@ -189,7 +188,6 @@ def read_file(
                 f"start_line ({start_line}) cannot be greater than end_line ({end_line})."
             )
 
-        # Preserve exact file contents (including trailing newlines) for unpaginated reads
         if start_line is None and end_line is None:
             sliced_content = raw_text
             start_num = 1 if total_lines > 0 else 0
@@ -206,7 +204,6 @@ def read_file(
             start_num = start_idx + 1 if total_lines > 0 else 0
             end_num = end_idx
 
-        # Bounded output limit: default is MAX_TOOL_OUTPUT_BYTES, IDE can pass MAX_READ_FILE_BYTES
         effective_output_limit = (
             max_output_bytes if max_output_bytes is not None else settings.MAX_TOOL_OUTPUT_BYTES
         )
@@ -357,10 +354,8 @@ def write_file(
 
         temp_file = safe_file.parent / f".tmp_{uuid.uuid4().hex}"
         try:
-            # newline="" prevents Windows CRLF (\r\n) translation, keeping SHA-256 byte-exact
             temp_file.write_text(content, encoding="utf-8", newline="")
 
-            # TOCTOU mitigation: Re-verify boundary containment and target identity
             rechecked_path = validate_safe_path(base_dir, path, must_exist=False)
             if rechecked_path.resolve() != safe_file.resolve():
                 raise ToolExecutionException(
@@ -390,28 +385,47 @@ def apply_patch(
     workspace_root: str | Path | None = None,
     raise_on_error: bool = False,
 ) -> ToolResult:
-    """Applies unified diff hunks or search-and-replace blocks atomically."""
+    """Applies unified diff hunks or search-and-replace blocks atomically, supporting new file creation."""
     try:
         base_dir = validate_workspace_dir(workspace_root)
-        safe_file = validate_safe_path(base_dir, path, must_exist=True)
+
+        # Detect whether this patch is explicitly creating a new file:
+        # A new file patch must reference /dev/null or start at @@ -0,0 and contain NO deletion lines (-)
+        patch_lines = patch_content.splitlines()
+        has_deletions = any(
+            line.startswith("-") and not line.startswith("---") for line in patch_lines
+        )
+        is_new_file_patch = (
+            "--- /dev/null" in patch_content
+            or "--- a/dev/null" in patch_content
+            or "@@ -0,0" in patch_content
+        ) and not has_deletions
+
+        # Enforce must_exist=True for regular edits, but allow must_exist=False for pure additions
+        safe_file = validate_safe_path(base_dir, path, must_exist=not is_new_file_patch)
         validate_not_protected(path, safe_file)
 
-        if safe_file.is_dir():
+        file_exists = safe_file.exists()
+        if file_exists and safe_file.is_dir():
             raise ToolExecutionException(f"Path '{path}' is a directory, not a file.")
 
         validate_content_size(
             patch_content, max_bytes=settings.MAX_PATCH_SIZE, field_name="patch_content"
         )
 
-        original_content = safe_file.read_text(encoding="utf-8")
+        original_content = safe_file.read_text(encoding="utf-8") if file_exists else ""
         hunks_applied = 0
         new_content = original_content
 
         newline = "\r\n" if "\r\n" in original_content else "\n"
-        ends_with_newline = original_content.endswith(("\n", "\r\n"))
+        ends_with_newline = original_content.endswith(("\n", "\r\n")) if file_exists else True
 
         # Strategy 1: Search-and-replace block format
         if "<<<<<<< SEARCH" in patch_content and ">>>>>>> REPLACE" in patch_content:
+            if not file_exists:
+                raise ToolExecutionException(
+                    f"Cannot apply search-and-replace patch to non-existent file '{path}'."
+                )
             block_pattern = re.compile(
                 r"<<<<<<< SEARCH\r?\n(.*?)\r?\n=======\r?\n(.*?)\r?\n>>>>>>> REPLACE",
                 re.DOTALL,
@@ -433,8 +447,7 @@ def apply_patch(
 
         # Strategy 2: Unified diff hunk format
         elif "@@" in patch_content:
-            patch_lines = patch_content.splitlines()
-            orig_lines = original_content.splitlines()
+            orig_lines = original_content.splitlines() if file_exists else []
             hunk_re = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 
             line_cursor = 0
@@ -455,9 +468,13 @@ def apply_patch(
                     elif hl.startswith("+"):
                         replacement.append(hl[1:])
                     elif hl == "":
-                        # LLM emitted blank line without leading space
                         expected_context.append("")
                         replacement.append("")
+
+                if not orig_lines:
+                    res_lines.extend(replacement)
+                    hunks_applied += 1
+                    return
 
                 block_len = len(expected_context)
                 matched_idx = -1
@@ -512,7 +529,6 @@ def apply_patch(
                     if pl.startswith((" ", "-", "+")):
                         hunk_lines.append(pl)
                     elif pl == "":
-                        # Preserve empty context lines
                         hunk_lines.append("")
                     elif pl.startswith("\\ No newline"):
                         continue
@@ -530,12 +546,13 @@ def apply_patch(
         if hunks_applied == 0:
             raise ToolExecutionException("No applicable hunks found in patch.")
 
+        safe_file.parent.mkdir(parents=True, exist_ok=True)
+
         temp_file = safe_file.parent / f".tmp_{uuid.uuid4().hex}"
         try:
             temp_file.write_text(new_content, encoding="utf-8")
 
-            # TOCTOU mitigation: Re-verify boundary containment and target identity
-            rechecked_path = validate_safe_path(base_dir, path, must_exist=True)
+            rechecked_path = validate_safe_path(base_dir, path, must_exist=file_exists)
             if rechecked_path.resolve() != safe_file.resolve():
                 raise ToolExecutionException(
                     f"Path target changed concurrently during patch application for '{path}'."

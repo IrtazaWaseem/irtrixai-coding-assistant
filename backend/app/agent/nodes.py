@@ -713,22 +713,47 @@ async def coder(state: AgentState, config: RunnableConfig | None = None) -> dict
         f"Execution Plan Guidance:\n{plan_section}",
     ]
 
+    ws_root = Path(workspace_path).resolve() if workspace_path else None
+
     # --- CONTEXT INGESTION: INITIAL VS REPAIR ---
     if repair_count == 0:
         repo_context = state.get("repository_context")
+        file_blocks: list[str] = []
+        seen_paths: set[str] = set()
+
         if repo_context and isinstance(repo_context, dict):
             relevant_files = repo_context.get("relevant_files", [])
-            file_blocks = [
-                _format_untrusted_code_excerpt(
-                    rf.get("path", ""), rf.get("excerpt", ""), rf.get("reason", "")
-                )
-                for rf in relevant_files
-                if rf.get("path") and rf.get("excerpt")
-            ]
-            if file_blocks:
-                prompt_blocks.append(
-                    "Relevant Existing Code Excerpts (UNTRUSTED DATA):\n" + "\n\n".join(file_blocks)
-                )
+            for rf in relevant_files:
+                p = rf.get("path", "")
+                exc = rf.get("excerpt", "")
+                if p and exc:
+                    seen_paths.add(p)
+                    file_blocks.append(_format_untrusted_code_excerpt(p, exc, rf.get("reason", "")))
+
+        # TARGET FILE INGESTION: Ensure all planned target files on disk are provided to the coder
+        for af in affected_files:
+            if af and af not in seen_paths and af != "/dev/null":
+                try:
+                    rf_res = read_file(af, workspace_root=ws_root)
+                    if rf_res.success and rf_res.output:
+                        content = (
+                            rf_res.output.get("content", "")
+                            if isinstance(rf_res.output, dict)
+                            else str(rf_res.output)
+                        )
+                        file_blocks.append(
+                            _format_untrusted_code_excerpt(
+                                af, content, "PLANNED TARGET FILE CONTENT FROM DISK"
+                            )
+                        )
+                        seen_paths.add(af)
+                except Exception as read_err:
+                    logger.debug("Failed reading planned target file %s: %s", af, read_err)
+
+        if file_blocks:
+            prompt_blocks.append(
+                "Relevant Existing Code Excerpts (UNTRUSTED DATA):\n" + "\n\n".join(file_blocks)
+            )
     else:
         prompt_blocks.append(
             f"ACTIVE REPAIR CYCLE ({repair_count} of {MAX_REPAIR_ITERATIONS}):\n"
@@ -751,7 +776,6 @@ async def coder(state: AgentState, config: RunnableConfig | None = None) -> dict
             for f in _get_val(debugger_out, "files_to_change", []) or []:
                 files_to_read.add(f)
 
-        ws_root = Path(workspace_path).resolve() if workspace_path else None
         current_disk_blocks: list[str] = []
         for rel_file in sorted(files_to_read):
             if not rel_file or rel_file == "/dev/null":
